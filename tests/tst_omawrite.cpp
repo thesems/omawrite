@@ -97,6 +97,40 @@ private slots:
         QCOMPARE(markup.at(2).markers[0].length, 1);
     }
 
+    void keepsLiteralUnderscoresUnformatted_data() {
+        QTest::addColumn<QString>("text");
+        QTest::newRow("wallet") << QStringLiteral("- STELLAR_FEE_COLLECTION_WALLET");
+        QTest::newRow("escaped-wallet")
+            << QStringLiteral("- STELLAR\\_FEE\\_COLLECTION_WALLET");
+        QTest::newRow("all-escaped-wallet")
+            << QStringLiteral("- STELLAR\\_FEE\\_COLLECTION\\_WALLET");
+        QTest::newRow("escaped-emphasis") << QStringLiteral("\\_literal\\_ and \\*literal\\*");
+        QTest::newRow("escaped-closing-marker") << QStringLiteral("_literal\\_");
+        QTest::newRow("unicode-identifier") << QStringLiteral("ö_fee_wallet");
+        QTest::newRow("double-underscore-identifier") << QStringLiteral("STELLAR__FEE__WALLET");
+    }
+
+    void keepsLiteralUnderscoresUnformatted() {
+        QFETCH(QString, text);
+        QVERIFY(MarkdownHighlighter::inlineMarkup(text).isEmpty());
+        QTextDocument document(text);
+        MarkdownHighlighter highlighter(&document);
+        highlighter.rehighlight();
+        for (const auto &range : document.firstBlock().layout()->formats()) {
+            QVERIFY(!range.format.fontItalic());
+            QVERIFY(range.format.fontWeight() != QFont::Bold);
+            QVERIFY(!range.format.hasProperty(QTextFormat::FontPointSize));
+        }
+    }
+
+    void preservesExplicitEmphasis() {
+        const auto markup = MarkdownHighlighter::inlineMarkup(
+            QStringLiteral("_italic_ __bold__ *italic* **bold** \\\\_italic_"));
+        QCOMPARE(markup.size(), 5);
+        for (const auto &item : markup)
+            QCOMPARE(item.content.length, item.kind == MarkdownHighlighter::InlineKind::Bold ? 4 : 6);
+    }
+
     void nestedListsWrapAndUndo() {
         Backend backend;
         QQmlEngine engine;

@@ -216,21 +216,42 @@ QList<MarkdownHighlighter::InlineMarkup> MarkdownHighlighter::inlineMarkup(const
     const auto span = [](const QRegularExpressionMatch &match, int group) {
         return Span{int(match.capturedStart(group)), int(match.capturedLength(group))};
     };
+    const auto isEscaped = [&text](int position) {
+        int backslashes = 0;
+        while (position > 0 && text.at(--position) == QLatin1Char('\\'))
+            ++backslashes;
+        return backslashes % 2 != 0;
+    };
+
+    const auto isWordCharacter = [](QChar character) {
+        return character.isLetterOrNumber() || character == QLatin1Char('_');
+    };
 
     static const QRegularExpression boldRe(QStringLiteral("(\\*\\*|__)(.+?)(\\1)"));
     QRegularExpressionMatchIterator boldMatches = boldRe.globalMatch(text);
     while (boldMatches.hasNext()) {
         const QRegularExpressionMatch match = boldMatches.next();
+        if (isEscaped(match.capturedStart(1)) || isEscaped(match.capturedStart(3)))
+            continue;
+        if (match.captured(1) == QStringLiteral("__")) {
+            const int start = match.capturedStart(0);
+            const int end = match.capturedEnd(0);
+            if ((start > 0 && isWordCharacter(text.at(start - 1)))
+                    || (end < text.length() && isWordCharacter(text.at(end))))
+                continue;
+        }
         markup.append({InlineKind::Bold, span(match, 2),
                        {span(match, 1), span(match, 3)}});
     }
 
     static const QRegularExpression italicRe(
-        QStringLiteral("(?<!\\*)\\*([^*\\n]+)\\*(?!\\*)|(?<!_)_([^_\\n]+)_(?!_)"));
+        QStringLiteral("(?<!\\*)\\*([^*\\n]+)\\*(?!\\*)|(?<![\\p{L}\\p{N}_])_([^_\\n]+)_(?![\\p{L}\\p{N}_])"));
     QRegularExpressionMatchIterator italicMatches = italicRe.globalMatch(text);
     while (italicMatches.hasNext()) {
         const QRegularExpressionMatch match = italicMatches.next();
         const Span whole = span(match, 0);
+        if (isEscaped(whole.start) || isEscaped(whole.start + whole.length - 1))
+            continue;
         const int contentIndex = match.capturedStart(1) >= 0 ? 1 : 2;
         markup.append({InlineKind::Italic, span(match, contentIndex),
                        {{whole.start, 1}, {whole.start + whole.length - 1, 1}}});
