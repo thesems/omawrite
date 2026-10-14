@@ -75,6 +75,9 @@ Install via the Omarchy Package Repository via the `omawrite` package. It's inst
 - `Ctrl+F` searches the document. Use `Enter` or `Ctrl+G` for the next match and `Shift+Enter` for the previous match.
 - `Ctrl+H` opens find and replace.
 - `Ctrl+B`, `Ctrl+I`, and `Ctrl+K` insert bold, italic, and link Markdown.
+- `Tab` / `Shift+Tab` indent / outdent list items by four spaces, including selected
+  groups. Enter continues the current list indentation. Nested bullet and numbered
+  lists keep their source markers; wrapped lines align beneath the item text.
 - `Ctrl+?` shows the keyboard shortcut reference.
 
 Unsaved drafts are recovered after an abnormal exit. Omawrite also watches open files

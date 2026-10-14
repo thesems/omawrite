@@ -97,6 +97,93 @@ private slots:
         QCOMPARE(markup.at(2).markers[0].length, 1);
     }
 
+    void nestedListsWrapAndUndo() {
+        Backend backend;
+        QQmlEngine engine;
+        QQmlComponent component(&engine);
+        component.setData("import QtQuick; TextEdit { width: 150; wrapMode: TextEdit.Wrap; font.pixelSize: 20 }", QUrl());
+        QScopedPointer<QObject> editor(component.create());
+        QVERIFY(editor);
+        auto *document = editor->property("textDocument").value<QQuickTextDocument *>()->textDocument();
+        backend.attachDocument(editor->property("textDocument").value<QQuickTextDocument *>());
+        connect(document, &QTextDocument::contentsChanged, &backend, &Backend::editorTextChanged);
+        const QString source = "- Parent item with enough text to wrap\n  - Child item with enough text to wrap\n1. Numbered parent\n   1. Numbered child\n```\n  - Code example\n```\n---";
+        document->setPlainText(source);
+        backend.editorTextChanged();
+        QCoreApplication::processEvents();
+        QCOMPARE(document->toPlainText(), source);
+        const QTextBlock parent = document->begin();
+        const QTextBlock child = parent.next();
+        QVERIFY(child.blockFormat().leftMargin() > parent.blockFormat().leftMargin());
+        QVERIFY(child.layout()->lineCount() > 1);
+        // The first line retains the source indentation; wrapped lines align
+        // at the content column instead of returning to the editor's edge.
+        QVERIFY(child.layout()->lineAt(1).x() > child.layout()->lineAt(0).x());
+        QVERIFY(child.next().next().blockFormat().leftMargin() > child.next().blockFormat().leftMargin());
+        QCOMPARE(document->findBlockByNumber(5).blockFormat().leftMargin(), 0.0);
+        QCOMPARE(document->findBlockByNumber(7).blockFormat().leftMargin(), 0.0);
+        document->clearUndoRedoStacks();
+        const int position = child.position() + 4;
+        const auto range = backend.indentList(position, position, false);
+        QCOMPARE(range.value("start").toInt(), position + 4);
+        QVERIFY(document->findBlockByNumber(1).text().startsWith("      -"));
+        document->undo();
+        QCOMPARE(document->toPlainText(), source);
+        document->redo();
+        QVERIFY(document->findBlockByNumber(1).text().startsWith("      -"));
+        backend.indentList(position + 4, position + 4, true);
+        QCOMPARE(document->toPlainText(), source);
+        QVERIFY(backend.indentList(document->findBlockByNumber(5).position(),
+                                   document->findBlockByNumber(5).position(), false).isEmpty());
+        // A selection ending at the next line's start excludes that line.
+        backend.indentList(0, child.position(), false);
+        QVERIFY(document->firstBlock().text().startsWith("    -"));
+        QCOMPARE(document->findBlockByNumber(1).text(), QString("  - Child item with enough text to wrap"));
+        document->undo();
+        QCOMPARE(document->toPlainText(), source);
+        QTextCursor cursor(document);
+        cursor.setPosition(0);
+        cursor.setPosition(2, QTextCursor::KeepAnchor);
+        cursor.removeSelectedText();
+        QCOMPARE(document->firstBlock().blockFormat().leftMargin(), 0.0);
+        document->undo();
+        QCOMPARE(document->toPlainText(), source);
+        QVERIFY(document->firstBlock().blockFormat().leftMargin() > 0);
+    }
+
+    void nestedListKeyboardControls() {
+        Backend backend;
+        Explorer explorer;
+        QQmlEngine engine;
+        engine.rootContext()->setContextProperty("backend", &backend);
+        engine.rootContext()->setContextProperty("explorer", &explorer);
+        QQmlComponent component(&engine, QUrl::fromLocalFile(QFINDTESTDATA("../src/Main.qml")));
+        QScopedPointer<QObject> object(component.create());
+        auto *window = qobject_cast<QQuickWindow *>(object.data());
+        QVERIFY2(window, qPrintable(component.errorString()));
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        QObject *editor = window->findChild<QObject *>("sourceEditor");
+        QVERIFY(editor);
+        editor->setProperty("text", "- Parent\n- Child");
+        editor->setProperty("cursorPosition", 16);
+        QTest::keyClick(window, Qt::Key_Tab);
+        QCOMPARE(editor->property("text").toString(), QString("- Parent\n    - Child"));
+        QCOMPARE(editor->property("cursorPosition").toInt(), 20);
+        QTest::keyClick(window, Qt::Key_Return);
+        QCOMPARE(editor->property("text").toString(), QString("- Parent\n    - Child\n    - "));
+        QTest::keyClick(window, Qt::Key_Tab, Qt::ShiftModifier);
+        QCOMPARE(editor->property("text").toString(), QString("- Parent\n    - Child\n- "));
+        QTest::keyClick(window, Qt::Key_Z, Qt::ControlModifier);
+        QCOMPARE(editor->property("text").toString(), QString("- Parent\n    - Child\n    - "));
+        // Indenting a selected group is one undoable edit.
+        editor->setProperty("text", "- Parent\n  - Child\nAfter");
+        QVERIFY(QMetaObject::invokeMethod(editor, "select", Q_ARG(int, 0), Q_ARG(int, 18)));
+        QTest::keyClick(window, Qt::Key_Tab);
+        QCOMPARE(editor->property("text").toString(), QString("    - Parent\n      - Child\nAfter"));
+        QTest::keyClick(window, Qt::Key_Z, Qt::ControlModifier);
+        QCOMPARE(editor->property("text").toString(), QString("- Parent\n  - Child\nAfter"));
+    }
+
     void loadsCurrentOmarchyTheme() {
         QTemporaryDir homeDirectory;
         QVERIFY(homeDirectory.isValid());

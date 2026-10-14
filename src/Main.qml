@@ -789,7 +789,14 @@ ApplicationWindow {
 
                     var returnKey = event.key === Qt.Key_Return || event.key === Qt.Key_Enter;
                     var commandModifier = event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier);
-                    if (returnKey && !commandModifier) {
+                    if (!commandModifier && (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab)) {
+                        var range = backend.indentList(selectionStart, selectionEnd,
+                                                      event.key === Qt.Key_Backtab || (event.modifiers & Qt.ShiftModifier));
+                        if (range.start !== undefined) {
+                            select(range.start, range.end);
+                            event.accepted = true;
+                        }
+                    } else if (returnKey && !commandModifier) {
                         smartReturn(event.modifiers & Qt.ShiftModifier);
                         event.accepted = true;
                     } else if (!commandModifier && event.key === Qt.Key_Backspace

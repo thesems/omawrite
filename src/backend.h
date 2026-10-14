@@ -79,6 +79,7 @@ public:
     Q_INVOKABLE QString clipboardUrl() const;
     Q_INVOKABLE QString clipboardText() const;
     Q_INVOKABLE bool editorTextChanged();
+    Q_INVOKABLE QVariantMap indentList(int start, int end, bool outdent);
     Q_INVOKABLE QVariantList hiddenRangesAt(int position) const;
     Q_INVOKABLE void setSearchHighlight(const QString &query, int currentMatchStart);
     Q_INVOKABLE void openExternalUrl(const QUrl &url);
@@ -114,7 +115,7 @@ private:
     void refreshWordCount();
     void scheduleWordCount();
     void applyDocumentTypography();
-    void reapplyTypographyToChange();
+    void refreshDocumentTypography();
     void scheduleRecovery();
     void writeRecovery();
     void restoreRecovery();
@@ -133,9 +134,6 @@ private:
     bool m_loading = false;
     bool m_closeAfterSave = false;
     bool m_formattingTypography = false;
-    int m_formattedBlockCount = 0;
-    int m_lastChangePos = 0;
-    int m_lastChangeAdded = 0;
     QTimer m_wordCountTimer;
     QTimer m_recoveryTimer;
     QFileSystemWatcher m_fileWatcher;

@@ -7,6 +7,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QFontDatabase>
+#include <QFontMetricsF>
 #include <QDesktopServices>
 #include <QGuiApplication>
 #include <QMimeData>
@@ -33,6 +34,31 @@
 #include <algorithm>
 
 #include "markdownhighlighter.h"
+
+namespace {
+QRegularExpressionMatch listPrefix(const QString &text) {
+    static const QRegularExpression rule(QStringLiteral("^[ \t]{0,3}([-*_])(?:[ \t]*\\1){2,}[ \t]*$"));
+    static const QRegularExpression list(QStringLiteral("^([ \t]*)(?:[-+*]|\\d{1,9}[.)])[ \t]+"));
+    return rule.match(text).hasMatch() ? QRegularExpressionMatch() : list.match(text);
+}
+
+// Track fences so source examples never acquire list layout or Tab behavior.
+bool updateFence(const QString &text, QChar &fence, int &length) {
+    static const QRegularExpression marker(QStringLiteral("^[ \t]*(`{3,}|~{3,})(.*)$"));
+    const auto match = marker.match(text);
+    if (!match.hasMatch()) return !fence.isNull();
+    const QString run = match.captured(1);
+    if (fence.isNull()) {
+        if (run.front() == QLatin1Char('`') && match.captured(2).contains(QLatin1Char('`')))
+            return false;
+        fence = run.front();
+        length = run.size();
+    } else if (run.front() == fence && run.size() >= length && match.captured(2).trimmed().isEmpty()) {
+        fence = QChar();
+    }
+    return true;
+}
+}
 
 constexpr qreal typoraLineHeightPercent = 140;
 const QString lastSaveDirectorySetting = QStringLiteral("file/lastSaveDirectory");
@@ -206,14 +232,6 @@ void Backend::attachDocument(QObject *textDocument) {
     m_highlighter = new MarkdownHighlighter(m_document);
     m_highlighter->setDarkMode(m_darkMode);
     m_highlighter->setColors(m_themeBackground, m_themeForeground, m_themeAccent);
-
-    connect(m_document, &QTextDocument::contentsChange, this,
-            [this](int position, int, int charsAdded) {
-                if (m_formattingTypography || m_loading)
-                    return;
-                m_lastChangePos = position;
-                m_lastChangeAdded = charsAdded;
-            });
 
     applyDocumentTypography();
     restoreRecovery();
@@ -393,12 +411,7 @@ bool Backend::editorTextChanged() {
         return false;
     m_lastDocumentText = text;
 
-    if (m_document) {
-        const int blockCount = m_document->blockCount();
-        if (blockCount > m_formattedBlockCount)
-            reapplyTypographyToChange();
-        m_formattedBlockCount = blockCount;
-    }
+    refreshDocumentTypography();
 
     scheduleWordCount();
     setModified(true);
@@ -519,6 +532,7 @@ QStringList Backend::selectableFontFamilies(const QStringList &families) {
 void Backend::documentFontChanged() {
     if (m_highlighter)
         m_highlighter->refreshFont();
+    refreshDocumentTypography();
 }
 
 void Backend::loadDocumentText(const QString &text) {
@@ -821,45 +835,102 @@ void Backend::applyDocumentTypography() {
     if (!m_document)
         return;
 
-    QTextBlockFormat blockFormat;
-    blockFormat.setLineHeight(typoraLineHeightPercent, QTextBlockFormat::ProportionalHeight);
-
-    // A full pass is only used for freshly loaded/attached documents, so it is
-    // safe to drop undo history here (re-enabling clears the stack anyway).
     const bool undoEnabled = m_document->isUndoRedoEnabled();
     m_document->setUndoRedoEnabled(false);
-
-    m_formattingTypography = true;
-    QTextCursor cursor(m_document);
-    cursor.select(QTextCursor::Document);
-    cursor.mergeBlockFormat(blockFormat);
-    m_formattingTypography = false;
-
+    refreshDocumentTypography();
     m_document->setUndoRedoEnabled(undoEnabled);
-
-    m_formattedBlockCount = m_document->blockCount();
 }
 
-void Backend::reapplyTypographyToChange() {
+void Backend::refreshDocumentTypography() {
     if (!m_document)
         return;
 
-    QTextBlockFormat blockFormat;
-    blockFormat.setLineHeight(typoraLineHeightPercent, QTextBlockFormat::ProportionalHeight);
-
-    // Format only the block(s) touched by the last edit instead of the whole
-    // document, and fold the change into the preceding edit command so a single
-    // undo reverts both the text and its formatting.
-    const int maxPos = m_document->characterCount() - 1;
-    const int start = qBound(0, m_lastChangePos, maxPos);
-    const int end = qBound(start, m_lastChangePos + m_lastChangeAdded, maxPos);
-
+    if (m_formattingTypography)
+        return;
     m_formattingTypography = true;
+    const QFontMetricsF metrics(m_document->defaultFont());
+    const qreal tabWidth = qMax(qreal(1), metrics.horizontalAdvance(QLatin1Char(' ')) * 4);
+    QTextOption option = m_document->defaultTextOption();
+    if (!qFuzzyCompare(option.tabStopDistance(), tabWidth)) {
+        option.setTabStopDistance(tabWidth);
+        m_document->setDefaultTextOption(option);
+    }
+    QChar fence;
+    int fenceLength = 0;
     QTextCursor cursor(m_document);
+    // A fence edit can change later blocks, so scan the document but only
+    // update changed formats. Join the text edit to keep undo atomic.
     cursor.joinPreviousEditBlock();
-    cursor.setPosition(start);
-    cursor.setPosition(end, QTextCursor::KeepAnchor);
-    cursor.mergeBlockFormat(blockFormat);
+    for (QTextBlock block = m_document->begin(); block.isValid(); block = block.next()) {
+        const QString text = block.text();
+        const bool inFence = updateFence(text, fence, fenceLength);
+        const auto prefix = inFence ? QRegularExpressionMatch() : listPrefix(text);
+        qreal prefixWidth = 0;
+        if (prefix.hasMatch()) {
+            for (QChar character : prefix.captured()) {
+                if (character == QLatin1Char('\t'))
+                    prefixWidth = (qFloor(prefixWidth / tabWidth) + 1) * tabWidth;
+                else
+                    prefixWidth += metrics.horizontalAdvance(character);
+            }
+        }
+        // Keep literal Markdown on the first line; wrapped text starts beneath
+        // the item content, including the indentation of nested items.
+        QTextBlockFormat format = block.blockFormat();
+        if (qFuzzyCompare(format.leftMargin() + 1, prefixWidth + 1)
+                && qFuzzyCompare(format.textIndent() + 1, 1 - prefixWidth)
+                && format.lineHeight() == typoraLineHeightPercent)
+            continue;
+        format.setLeftMargin(prefixWidth);
+        format.setTextIndent(-prefixWidth);
+        format.setLineHeight(typoraLineHeightPercent, QTextBlockFormat::ProportionalHeight);
+        cursor.setPosition(block.position());
+        cursor.setBlockFormat(format);
+    }
     cursor.endEditBlock();
     m_formattingTypography = false;
+}
+
+QVariantMap Backend::indentList(int start, int end, bool outdent) {
+    if (!m_document) return {};
+    start = qBound(0, start, m_document->characterCount() - 1);
+    end = qBound(start, end, m_document->characterCount() - 1);
+    const QTextBlock first = m_document->findBlock(start);
+    const QTextBlock last = m_document->findBlock(end > start ? end - 1 : end);
+    QList<QPair<int, int>> edits;
+    QChar fence;
+    int fenceLength = 0;
+    for (QTextBlock block = m_document->begin(); block.isValid(); block = block.next()) {
+        const bool inFence = updateFence(block.text(), fence, fenceLength);
+        if (block.position() > last.position()) break;
+        if (block.position() < first.position()) continue;
+        const auto prefix = inFence ? QRegularExpressionMatch() : listPrefix(block.text());
+        if (!prefix.hasMatch()) return {};
+        const QString indentation = prefix.captured(1);
+        int removed = 0;
+        if (outdent && !indentation.isEmpty()) {
+            if (indentation.front() == QLatin1Char('\t')) {
+                removed = 1;
+            } else {
+                while (removed < qMin(4, int(indentation.size()))
+                       && indentation.at(removed) == QLatin1Char(' '))
+                    ++removed;
+            }
+        }
+        edits.append({block.position(), removed});
+    }
+    QTextCursor cursor(m_document);
+    cursor.beginEditBlock();
+    int adjustedStart = start, adjustedEnd = end;
+    for (auto it = edits.crbegin(); it != edits.crend(); ++it) {
+        cursor.setPosition(it->first);
+        cursor.setPosition(it->first + it->second, QTextCursor::KeepAnchor);
+        if (outdent) cursor.removeSelectedText();
+        else cursor.insertText(QStringLiteral("    "));
+        const int delta = outdent ? -it->second : 4;
+        if (it->first <= start) adjustedStart = qMax(it->first, adjustedStart + delta);
+        if (it->first <= end) adjustedEnd = qMax(it->first, adjustedEnd + delta);
+    }
+    cursor.endEditBlock();
+    return {{QStringLiteral("start"), adjustedStart}, {QStringLiteral("end"), adjustedEnd}};
 }
