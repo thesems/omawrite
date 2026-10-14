@@ -13,7 +13,7 @@ ApplicationWindow {
     minimumWidth: 720
     minimumHeight: 520
     visible: true
-    title: (backend.modified ? "* " : "") + backend.fileName + " - Omawrite"
+    title: (backend.modified ? "* " : "") + backend.fileName + " - Omawrite v2"
 
     readonly property bool darkMode: backend.darkMode
     readonly property color pageColor: backend.themeBackground
@@ -29,7 +29,9 @@ ApplicationWindow {
     readonly property int footerHeight: scaledSize(32)
     readonly property int editorWidth: Math.min(
         Math.round(writerFontMetrics.averageCharacterWidth * 65),
-        Math.max(360, width - Math.round(writerFontMetrics.averageCharacterWidth * 20)))
+        Math.max(240, editorArea.width - Math.round(writerFontMetrics.averageCharacterWidth * 8)))
+    property bool sidebarVisible: true
+    readonly property int sidebarWidth: sidebarVisible ? Math.min(scaledSize(280), Math.round(width * 0.35)) : 0
     property bool closeConfirmed: false
     property bool searchOpen: false
     property bool searchUpdating: false
@@ -55,6 +57,7 @@ ApplicationWindow {
     }
 
     function requestOpen(url) {
+        if (url === backend.fileUrl) return;
         if (!backend.modified) {
             backend.open(url);
             return;
@@ -136,6 +139,12 @@ ApplicationWindow {
         searchUpdating = false;
         replaceOpen = false;
         editor.forceActiveFocus();
+    }
+
+    Shortcut {
+        sequence: "Ctrl+E"
+        context: Qt.ApplicationShortcut
+        onActivated: win.sidebarVisible = !win.sidebarVisible
     }
 
     Shortcut {
@@ -241,6 +250,21 @@ ApplicationWindow {
     Connections {
         target: backend
 
+        function onDocumentOpened() {
+            win.closeSearch();
+            editor.deselect();
+            editor.cursorPosition = editor.text.length;
+            editor.forceActiveFocus();
+            editorFlick.scrollTo(editorFlick.contentY);
+            editorFlick.ensureCursorVisible();
+            var openedUrl = backend.fileUrl;
+            var openedEnd = editor.cursorPosition;
+            Qt.callLater(function() {
+                if (backend.fileUrl === openedUrl && editor.cursorPosition === openedEnd)
+                    editorFlick.ensureCursorVisible();
+            });
+        }
+
         function onOpenDialogRequested() {
             openFileDialog.open();
         }
@@ -329,19 +353,33 @@ ApplicationWindow {
         id: shortcutsDialog
         modal: true
         title: "Keyboard shortcuts"
+        width: Math.min(win.width - 40, win.scaledSize(480))
         standardButtons: Dialog.Close
         anchors.centerIn: parent
         contentItem: Label {
-            text: "Ctrl+S  Save\nCtrl+Shift+S  Save As\nCtrl+O  Open\nCtrl+N  New Window\nCtrl+F  Find\nCtrl+H  Find and Replace\nCtrl+B  Bold\nCtrl+I  Italic\nCtrl+K  Link\nCtrl+P  Print\nF11 / Super+F  Fullscreen\nCtrl+?  Shortcuts"
+            text: "Ctrl+E  Toggle Explorer\nCtrl+S  Save\nCtrl+Shift+S  Save As\nCtrl+O  Open\nCtrl+N  New Window\nCtrl+F  Find\nCtrl+H  Find and Replace\nCtrl+B  Bold\nCtrl+I  Italic\nCtrl+K  Link\nCtrl+P  Print\nF11 / Super+F  Fullscreen\nCtrl+?  Shortcuts"
             lineHeight: 1.5
         }
     }
 
+    ExplorerSidebar {
+        window: win
+        anchors.left: parent.left
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        width: win.sidebarWidth
+        visible: win.sidebarVisible
+        onOpenFile: function(file) { win.requestOpen(file); }
+    }
+
     Item {
+        id: editorArea
         anchors.fill: parent
+        anchors.leftMargin: win.sidebarWidth
 
         Flickable {
             id: editorFlick
+            objectName: "editorScrollArea"
             anchors.fill: parent
             anchors.leftMargin: 24
             anchors.rightMargin: 24
@@ -807,6 +845,16 @@ ApplicationWindow {
             anchors.bottomMargin: 10
             spacing: 12
             opacity: 0.55
+
+            ToolButton {
+                objectName: "sidebarToggle"
+                text: "☰"
+                width: win.scaledSize(24)
+                height: win.scaledSize(20)
+                onClicked: win.sidebarVisible = !win.sidebarVisible
+                ToolTip.visible: hovered
+                ToolTip.text: "Toggle sidebar (Ctrl+E)"
+            }
 
             FooterIconButton {
                 objectName: "saveButton"

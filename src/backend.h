@@ -64,6 +64,8 @@ public:
     Q_INVOKABLE void attachDocument(QObject *textDocument);
     Q_INVOKABLE void openDialog();
     Q_INVOKABLE void open(const QUrl &url);
+    void relocateFile(const QUrl &oldUrl, const QUrl &newUrl);
+    void detachTrashedFile(const QUrl &url);
     Q_INVOKABLE void save();
     Q_INVOKABLE void saveForClose();
     Q_INVOKABLE void saveAsDialog();
@@ -86,6 +88,7 @@ public:
 
 signals:
     void fileUrlChanged();
+    void documentOpened();
     void modifiedChanged();
     void statusChanged();
     void wordCountChanged();

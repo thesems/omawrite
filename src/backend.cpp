@@ -223,6 +223,26 @@ void Backend::openDialog() {
     emit openDialogRequested();
 }
 
+void Backend::relocateFile(const QUrl &oldUrl, const QUrl &newUrl) {
+    if (!m_fileUrl.isLocalFile()) return;
+    const QString current = m_fileUrl.toLocalFile();
+    const QString oldPath = oldUrl.toLocalFile();
+    if (current != oldPath && !current.startsWith(oldPath + '/')) return;
+    setFileUrl(QUrl::fromLocalFile(newUrl.toLocalFile() + current.mid(oldPath.size())));
+    watchCurrentFile();
+    if (m_modified) scheduleRecovery();
+}
+
+void Backend::detachTrashedFile(const QUrl &url) {
+    if (m_fileUrl != url && (!m_fileUrl.isLocalFile()
+        || !m_fileUrl.toLocalFile().startsWith(url.toLocalFile() + '/'))) return;
+    setFileUrl(QUrl());
+    watchCurrentFile();
+    setModified(true);
+    scheduleRecovery();
+    setStatus(QStringLiteral("Moved to Trash; text kept as an unsaved draft"));
+}
+
 void Backend::open(const QUrl &url) {
     if (!url.isLocalFile()) {
         setStatus(QStringLiteral("Only local files can be opened."));
@@ -245,6 +265,7 @@ void Backend::open(const QUrl &url) {
     watchCurrentFile();
     setModified(false);
     setStatus(QStringLiteral("Opened %1").arg(fileName()));
+    emit documentOpened();
 }
 
 void Backend::save() {

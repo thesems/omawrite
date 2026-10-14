@@ -5,10 +5,12 @@ TARGET = tst_omawrite
 
 INCLUDEPATH += ../src
 SOURCES += \
+    ../src/explorer.cpp \
     tst_omawrite.cpp \
     ../src/backend.cpp \
     ../src/markdownhighlighter.cpp
 HEADERS += \
+    ../src/explorer.h \
     ../src/backend.h \
     ../src/markdownhighlighter.h
 

@@ -9,13 +9,16 @@
 #include <QUrl>
 #include <QWindow>
 #include <QFile>
+#include <QFileInfo>
 
 #include "backend.h"
+#include "explorer.h"
 #include "systemtheme.h"
 
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("omawrite"));
+    app.setApplicationDisplayName(QStringLiteral("Omawrite v2"));
     app.setDesktopFileName(QStringLiteral("omawrite"));
     app.setWindowIcon(QIcon::fromTheme(QStringLiteral("omawrite")));
 
@@ -29,6 +32,9 @@ int main(int argc, char *argv[]) {
     QQuickStyle::setStyle(QStringLiteral("Material"));
 
     Backend backend(&app);
+    Explorer explorer(&app);
+    QObject::connect(&explorer, &Explorer::entryRenamed, &backend, &Backend::relocateFile);
+    QObject::connect(&explorer, &Explorer::entryTrashed, &backend, &Backend::detachTrashedFile);
     SystemTheme systemTheme(&app);
     backend.setDarkMode(systemTheme.darkMode());
     QObject::connect(&systemTheme, &SystemTheme::darkModeChanged, &backend,
@@ -61,6 +67,7 @@ int main(int argc, char *argv[]) {
             qWarning().noquote() << warning.toString();
     });
     engine.rootContext()->setContextProperty(QStringLiteral("backend"), &backend);
+    engine.rootContext()->setContextProperty(QStringLiteral("explorer"), &explorer);
 
     engine.load(QUrl(QStringLiteral("qrc:/Main.qml")));
     if (engine.rootObjects().isEmpty()) {
@@ -72,8 +79,17 @@ int main(int argc, char *argv[]) {
     backend.setParentWindow(qobject_cast<QWindow *>(engine.rootObjects().constFirst()));
 
     const QStringList args = app.arguments();
-    if (args.size() > 1 && !backend.modified())
-        backend.open(QUrl::fromLocalFile(args.at(1)));
+    if (args.size() > 1) {
+        const QFileInfo entry(args.at(1));
+        if (entry.isDir())
+            explorer.chooseFolder(QUrl::fromLocalFile(entry.absoluteFilePath()));
+        else {
+            if (entry.exists())
+                explorer.chooseFolder(QUrl::fromLocalFile(entry.absolutePath()));
+            if (!backend.modified())
+                backend.open(QUrl::fromLocalFile(entry.absoluteFilePath()));
+        }
+    }
 
     return app.exec();
 }

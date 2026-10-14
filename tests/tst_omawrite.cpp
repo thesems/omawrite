@@ -4,8 +4,12 @@
 #include <QQmlContext>
 #include <QQmlEngine>
 #include <QQuickStyle>
+#include <QQuickWindow>
+#include <QQuickItem>
+#include <QQuickTextDocument>
 
 #include "backend.h"
+#include "explorer.h"
 #include "markdownhighlighter.h"
 
 class OmawriteTest : public QObject {
@@ -206,8 +210,10 @@ private slots:
         QVERIFY(!mainQmlPath.isEmpty());
 
         Backend backend;
+        Explorer explorer;
         QQmlEngine engine;
         engine.rootContext()->setContextProperty(QStringLiteral("backend"), &backend);
+        engine.rootContext()->setContextProperty(QStringLiteral("explorer"), &explorer);
         QQmlComponent component(&engine, QUrl::fromLocalFile(mainQmlPath));
         QVERIFY2(component.isReady(), qPrintable(component.errorString()));
         QScopedPointer<QObject> window(component.create());
@@ -236,8 +242,10 @@ private slots:
         QVERIFY(!mainQmlPath.isEmpty());
 
         Backend backend;
+        Explorer explorer;
         QQmlEngine engine;
         engine.rootContext()->setContextProperty(QStringLiteral("backend"), &backend);
+        engine.rootContext()->setContextProperty(QStringLiteral("explorer"), &explorer);
         QQmlComponent component(&engine, QUrl::fromLocalFile(mainQmlPath));
         QVERIFY2(component.isReady(), qPrintable(component.errorString()));
         QScopedPointer<QObject> window(component.create());
@@ -285,7 +293,332 @@ private slots:
         QCOMPARE(QFileInfo(fallbackUrl.toLocalFile()).absolutePath(), QDir::homePath());
     }
 
+    void explorerProtectsExistingFilesAndCreatesNestedNotes() {
+        QTemporaryDir workspace;
+        QTemporaryDir outside;
+        Explorer explorer;
+        const QUrl root = QUrl::fromLocalFile(workspace.path());
+        explorer.chooseFolder(root);
+        const QUrl folder = explorer.createEntry(root, "Ideas", true);
+        QVERIFY(QFileInfo(folder.toLocalFile()).isDir());
+        const QUrl note = explorer.createEntry(folder, "hello.md", false);
+        QVERIFY(QFileInfo::exists(note.toLocalFile()));
+        QFile contents(note.toLocalFile());
+        QVERIFY(contents.open(QIODevice::WriteOnly));
+        contents.write("Keep my writing");
+        contents.close();
+        QVERIFY(explorer.createEntry(folder, "hello.md", false).isEmpty());
+        QVERIFY(explorer.createEntry(root, "../escape.md", false).isEmpty());
+        QVERIFY(explorer.createEntry(QUrl::fromLocalFile(outside.path()), "escape.md", false).isEmpty());
+        QVERIFY(contents.open(QIODevice::ReadOnly));
+        QCOMPARE(contents.readAll(), QByteArray("Keep my writing"));
+        contents.close();
+        QSignalSpy renameSpy(&explorer, &Explorer::entryRenamed);
+        QVERIFY(explorer.renameEntry(note, "renamed.md"));
+        QCOMPARE(renameSpy.count(), 1);
+        QVERIFY(!QFileInfo::exists(note.toLocalFile()));
+        QVERIFY(QFileInfo::exists(workspace.filePath("Ideas/renamed.md")));
+        QVERIFY(!explorer.renameEntry(folder, "../bad"));
+    }
+
+    void explorerRequiresMdOrTxtForFiles() {
+        QTemporaryDir workspace;
+        Explorer explorer;
+        explorer.chooseFolder(QUrl::fromLocalFile(workspace.path()));
+        for (const QString name : {"fees", "fees.markdown", "fees.pdf", "fees.md.exe", "fees.txt."}) {
+            QVERIFY(explorer.createEntry(explorer.folderUrl(), name, false).isEmpty());
+            QVERIFY(!QFileInfo::exists(workspace.filePath(name)));
+            QCOMPARE(explorer.error(), QString("File names must end in .md or .txt."));
+        }
+        const QUrl markdown = explorer.createEntry(explorer.folderUrl(), "fees.md", false);
+        QVERIFY(!markdown.isEmpty());
+        QVERIFY(!explorer.createEntry(explorer.folderUrl(), "fees.txt", false).isEmpty());
+        QVERIFY(!explorer.createEntry(explorer.folderUrl(), "FEES.MD", false).isEmpty());
+        QVERIFY(!explorer.renameEntry(markdown, "fees"));
+        QVERIFY(QFileInfo::exists(markdown.toLocalFile()));
+        QVERIFY(explorer.renameEntry(markdown, "renamed.txt"));
+        QVERIFY(!explorer.createEntry(explorer.folderUrl(), "Folder", true).isEmpty());
+    }
+
+    void renamingFolderKeepsOpenDocumentSavePath() {
+        QTemporaryDir workspace;
+        Explorer explorer;
+        explorer.chooseFolder(QUrl::fromLocalFile(workspace.path()));
+        const QUrl folder = explorer.createEntry(explorer.folderUrl(), "Before", true);
+        const QUrl note = explorer.createEntry(folder, "note.md", false);
+        Backend backend;
+        QObject::connect(&explorer, &Explorer::entryRenamed, &backend, &Backend::relocateFile);
+        backend.open(note);
+        QVERIFY(explorer.renameEntry(folder, "After"));
+        QCOMPARE(backend.fileUrl().toLocalFile(), workspace.filePath("After/note.md"));
+        backend.save();
+        QVERIFY(QFileInfo::exists(backend.fileUrl().toLocalFile()));
+        QVERIFY(!QFileInfo::exists(note.toLocalFile()));
+    }
+
+    void movesRefuseCollisionsAndFolderCycles() {
+        QTemporaryDir workspace;
+        Explorer explorer;
+        explorer.chooseFolder(QUrl::fromLocalFile(workspace.path()));
+        const QUrl folder = explorer.createEntry(explorer.folderUrl(), "Folder", true);
+        const QUrl nested = explorer.createEntry(folder, "Nested", true);
+        const QUrl note = explorer.createEntry(explorer.folderUrl(), "note.md", false);
+        const QUrl duplicate = explorer.createEntry(folder, "note.md", false);
+        QVERIFY(!explorer.moveEntry(note, folder));
+        QVERIFY(QFileInfo::exists(note.toLocalFile()));
+        QVERIFY(!explorer.moveEntry(folder, nested));
+        QVERIFY(QFileInfo::exists(folder.toLocalFile()));
+        QVERIFY(QFile::remove(duplicate.toLocalFile()));
+        Backend backend;
+        QObject::connect(&explorer, &Explorer::entryRenamed, &backend, &Backend::relocateFile);
+        backend.open(note);
+        QVERIFY(explorer.moveEntry(note, folder));
+        QCOMPARE(backend.fileUrl().toLocalFile(), workspace.filePath("Folder/note.md"));
+    }
+
+    void dragsNoteOntoFolderInSidebar() {
+        QTemporaryDir workspace;
+        Explorer explorer;
+        explorer.chooseFolder(QUrl::fromLocalFile(workspace.path()));
+        const QUrl folder = explorer.createEntry(explorer.folderUrl(), "Destination", true);
+        const QUrl note = explorer.createEntry(explorer.folderUrl(), "drag.md", false);
+        Backend backend;
+        QQmlEngine engine;
+        engine.rootContext()->setContextProperty("backend", &backend);
+        engine.rootContext()->setContextProperty("explorer", &explorer);
+        QQmlComponent component(&engine, QUrl::fromLocalFile(QFINDTESTDATA("../src/Main.qml")));
+        QVERIFY2(component.isReady(), qPrintable(component.errorString()));
+        QScopedPointer<QObject> object(component.create());
+        auto *window = qobject_cast<QQuickWindow *>(object.data());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        QQuickItem *source = nullptr;
+        QQuickItem *destination = nullptr;
+        QTRY_VERIFY((source = findVisualItem(window->contentItem(), "entry:drag.md")));
+        QTRY_VERIFY((destination = findVisualItem(window->contentItem(), "entry:Destination")));
+        const QPoint start = source->mapToScene(QPointF(source->width() / 2, source->height() / 2)).toPoint();
+        const QPoint end = destination->mapToScene(QPointF(destination->width() / 2, destination->height() / 2)).toPoint();
+        QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, start);
+        QTest::mouseMove(window, start + QPoint(20, 0), 30);
+        QTest::mouseMove(window, start + QPoint(30, 0), 30);
+        QTest::mouseMove(window, end, 30);
+        QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, end, 30);
+        QTRY_VERIFY(QFileInfo::exists(workspace.filePath("Destination/drag.md")));
+        QVERIFY(!QFileInfo::exists(note.toLocalFile()));
+        QTRY_COMPARE(visibleEntryCount(window->contentItem(), "entry:drag.md"), 1);
+        QTRY_VERIFY((source = findVisualItem(window->contentItem(), "entry:drag.md"))
+            && source->property("entryUrl").toUrl().toLocalFile() == workspace.filePath("Destination/drag.md"));
+        QQuickItem *rootTarget = findVisualItem(window->contentItem(), "rootDropTarget");
+        QVERIFY(rootTarget);
+        const QPoint fromFolder = source->mapToScene(QPointF(source->width() / 2, source->height() / 2)).toPoint();
+        QVERIFY(!rootTarget->isVisible());
+        QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, fromFolder);
+        QTest::mouseMove(window, fromFolder + QPoint(20, 0), 30);
+        QTest::mouseMove(window, fromFolder + QPoint(30, 0), 30);
+        QTRY_VERIFY(rootTarget->isVisible());
+        QTest::qWait(30); // Let the layout place the newly revealed drop target.
+        const QPoint toRoot = rootTarget->mapToScene(QPointF(rootTarget->width() / 2, rootTarget->height() / 2)).toPoint();
+        QTest::mouseMove(window, toRoot, 30);
+        QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, toRoot, 30);
+        QTRY_VERIFY(QFileInfo::exists(note.toLocalFile()));
+        QVERIFY(!QFileInfo::exists(workspace.filePath("Destination/drag.md")));
+        QTRY_COMPARE(visibleEntryCount(window->contentItem(), "entry:drag.md"), 1);
+        QTRY_VERIFY(!rootTarget->isVisible());
+        QQuickItem *tree = findVisualItem(window->contentItem(), "explorerTree");
+        QVERIFY(tree);
+        const QPoint emptySpace = tree->mapToScene(QPointF(80, tree->height() - 20)).toPoint();
+        QTest::mouseClick(window, Qt::RightButton, Qt::NoModifier, emptySpace);
+        QObject *menu = window->findChild<QObject *>("explorerContextMenu");
+        QVERIFY(menu);
+        QTRY_VERIFY(menu->property("visible").toBool());
+        QObject *sidebar = window->findChild<QObject *>("explorerSidebar");
+        QVERIFY(sidebar);
+        QCOMPARE(sidebar->property("selectedUrl").toUrl(), explorer.folderUrl());
+        QObject *deleteItem = window->findChild<QObject *>("deleteEntryMenuItem");
+        QVERIFY(deleteItem);
+        QVERIFY(!deleteItem->property("enabled").toBool());
+    }
+
+    void trashingOpenFileKeepsDraft_data() {
+        QTest::addColumn<bool>("deleteFolder");
+        QTest::newRow("file") << false;
+        QTest::newRow("folder-with-open-file") << true;
+    }
+
+    void trashingOpenFileKeepsDraft() {
+        QFETCH(bool, deleteFolder);
+        QTemporaryDir workspace;
+        QTemporaryDir trashData;
+        const QByteArray previousData = qgetenv("XDG_DATA_HOME");
+        struct RestoreDataHome {
+            QByteArray value;
+            ~RestoreDataHome() {
+                if (value.isNull()) qunsetenv("XDG_DATA_HOME");
+                else qputenv("XDG_DATA_HOME", value);
+            }
+        } restore{previousData};
+        qputenv("XDG_DATA_HOME", trashData.path().toUtf8());
+        const QString folderPath = workspace.filePath("Folder");
+        QVERIFY(QDir().mkdir(folderPath));
+        const QUrl note = QUrl::fromLocalFile(folderPath + "/note.md");
+        QFile file(note.toLocalFile());
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write("Keep this draft");
+        file.close();
+        Backend backend;
+        QQmlEngine engine;
+        QQmlComponent component(&engine);
+        component.setData("import QtQuick; TextEdit {}", QUrl());
+        QScopedPointer<QObject> editor(component.create());
+        QVERIFY(editor);
+        backend.attachDocument(editor->property("textDocument").value<QQuickTextDocument *>());
+        backend.open(note);
+        Explorer explorer;
+        explorer.chooseFolder(QUrl::fromLocalFile(workspace.path()));
+        QObject::connect(&explorer, &Explorer::entryTrashed, &backend, &Backend::detachTrashedFile);
+        QVERIFY(!explorer.trashEntry(explorer.folderUrl()));
+        QVERIFY(explorer.trashEntry(deleteFolder ? QUrl::fromLocalFile(folderPath) : note));
+        QVERIFY(!QFileInfo::exists(note.toLocalFile()));
+        QCOMPARE(QFileInfo::exists(folderPath), !deleteFolder);
+        QVERIFY(backend.fileUrl().isEmpty());
+        QVERIFY(backend.modified());
+        const QUrl restored = QUrl::fromLocalFile(workspace.filePath("restored.md"));
+        backend.saveAs(restored);
+        QFile result(restored.toLocalFile());
+        QVERIFY(result.open(QIODevice::ReadOnly));
+        QCOMPARE(result.readAll(), QByteArray("Keep this draft"));
+    }
+
+    void sidebarSwitchPreservesUnsavedChanges() {
+        QTemporaryDir workspace;
+        Explorer explorer;
+        explorer.chooseFolder(QUrl::fromLocalFile(workspace.path()));
+        const QUrl first = explorer.createEntry(explorer.folderUrl(), "first.md", false);
+        const QUrl second = explorer.createEntry(explorer.folderUrl(), "second.md", false);
+        Backend backend;
+        QQmlEngine engine;
+        engine.rootContext()->setContextProperty("backend", &backend);
+        engine.rootContext()->setContextProperty("explorer", &explorer);
+        QQmlComponent component(&engine, QUrl::fromLocalFile(QFINDTESTDATA("../src/Main.qml")));
+        QScopedPointer<QObject> window(component.create());
+        QVERIFY2(window, qPrintable(component.errorString()));
+        backend.open(first);
+        QObject *editor = window->findChild<QObject *>("sourceEditor");
+        QVERIFY(editor);
+        editor->setProperty("text", "Unsaved writing");
+        QVERIFY(backend.modified());
+        QVERIFY(QMetaObject::invokeMethod(window.data(), "requestOpen", Q_ARG(QVariant, QVariant(second))));
+        QCOMPARE(backend.fileUrl(), first);
+        QCOMPARE(editor->property("text").toString(), QString("Unsaved writing"));
+        QCOMPARE(window->property("pendingAction").toString(), QString("open"));
+        backend.save();
+        QCOMPARE(backend.fileUrl(), second);
+        QFile saved(first.toLocalFile());
+        QVERIFY(saved.open(QIODevice::ReadOnly));
+        QCOMPARE(saved.readAll(), QByteArray("Unsaved writing"));
+    }
+
+    void switchingFilesPlacesCaretAtEndWithoutMovingCaretOnSave() {
+        QTemporaryDir workspace;
+        const QUrl first = QUrl::fromLocalFile(workspace.filePath("long.md"));
+        const QUrl second = QUrl::fromLocalFile(workspace.filePath("short.md"));
+        QFile longFile(first.toLocalFile());
+        QVERIFY(longFile.open(QIODevice::WriteOnly));
+        longFile.write(QString("A line of writing\n").repeated(200).toUtf8());
+        longFile.close();
+        QFile shortFile(second.toLocalFile());
+        QVERIFY(shortFile.open(QIODevice::WriteOnly));
+        shortFile.write("Short document");
+        shortFile.close();
+        Explorer explorer;
+        explorer.chooseFolder(QUrl::fromLocalFile(workspace.path()));
+        Backend backend;
+        QQmlEngine engine;
+        engine.rootContext()->setContextProperty("backend", &backend);
+        engine.rootContext()->setContextProperty("explorer", &explorer);
+        QQmlComponent component(&engine, QUrl::fromLocalFile(QFINDTESTDATA("../src/Main.qml")));
+        QScopedPointer<QObject> object(component.create());
+        auto *window = qobject_cast<QQuickWindow *>(object.data());
+        QVERIFY2(window, qPrintable(component.errorString()));
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        QObject *editor = window->findChild<QObject *>("sourceEditor");
+        QObject *scroll = window->findChild<QObject *>("editorScrollArea");
+        QVERIFY(editor);
+        QVERIFY(scroll);
+        backend.open(first);
+        QTRY_COMPARE(editor->property("cursorPosition").toInt(), editor->property("text").toString().size());
+        QTRY_VERIFY(scroll->property("contentY").toReal() > 0);
+        editor->setProperty("cursorPosition", 2000);
+        QVERIFY(QMetaObject::invokeMethod(editor, "select", Q_ARG(int, 1900), Q_ARG(int, 2000)));
+        QTRY_VERIFY(scroll->property("contentY").toReal() > 0);
+        backend.open(second);
+        QTRY_COMPARE(editor->property("cursorPosition").toInt(), 14);
+        QCOMPARE(editor->property("selectionStart").toInt(), 14);
+        QCOMPARE(editor->property("selectionEnd").toInt(), 14);
+        QTRY_COMPARE(scroll->property("contentY").toReal(), 0.0);
+        QVERIFY(editor->property("activeFocus").toBool());
+        for (const char letter : QByteArray(" New")) QTest::keyClick(window, letter);
+        QCOMPARE(editor->property("text").toString(), QString("Short document New"));
+        QCOMPARE(editor->property("cursorPosition").toInt(), 18);
+        backend.save();
+        QCOMPARE(editor->property("cursorPosition").toInt(), 18);
+        backend.saveAs(QUrl::fromLocalFile(workspace.filePath("renamed.md")));
+        QCOMPARE(editor->property("cursorPosition").toInt(), 18);
+        backend.open(QUrl::fromLocalFile(workspace.filePath("missing.md")));
+        QCOMPARE(editor->property("cursorPosition").toInt(), 18);
+    }
+
+    void insertingFileKeepsEveryExplorerRowMappedToItsFile() {
+        QTemporaryDir workspace;
+        Explorer explorer;
+        explorer.chooseFolder(QUrl::fromLocalFile(workspace.path()));
+        const QUrl linter = explorer.createEntry(explorer.folderUrl(), "linter.md", false);
+        QFile content(linter.toLocalFile());
+        QVERIFY(content.open(QIODevice::WriteOnly));
+        content.write("Linter document");
+        content.close();
+        Backend backend;
+        QQmlEngine engine;
+        engine.rootContext()->setContextProperty("backend", &backend);
+        engine.rootContext()->setContextProperty("explorer", &explorer);
+        QQmlComponent component(&engine, QUrl::fromLocalFile(QFINDTESTDATA("../src/Main.qml")));
+        QScopedPointer<QObject> object(component.create());
+        auto *window = qobject_cast<QQuickWindow *>(object.data());
+        QVERIFY(window);
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        QTRY_VERIFY(findVisualItem(window->contentItem(), "entry:linter.md"));
+        backend.open(linter);
+        const QUrl hyperliquid = explorer.createEntry(explorer.folderUrl(), "hyperliquid.md", false);
+        QVERIFY(QMetaObject::invokeMethod(window, "requestOpen", Q_ARG(QVariant, QVariant(hyperliquid))));
+        QCOMPARE(backend.fileUrl(), hyperliquid);
+        QQuickItem *newEntry = nullptr;
+        QTRY_VERIFY((newEntry = findVisualItem(window->contentItem(), "entry:hyperliquid.md")));
+        QTRY_COMPARE(newEntry->property("entryUrl").toUrl(), hyperliquid);
+        QQuickItem *oldEntry = findVisualItem(window->contentItem(), "entry:linter.md");
+        QVERIFY(oldEntry);
+        QCOMPARE(oldEntry->property("entryUrl").toUrl(), linter);
+        const QPoint point = newEntry->mapToScene(QPointF(80, newEntry->height() / 2)).toPoint();
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, point);
+        QCOMPARE(backend.fileUrl(), hyperliquid);
+        QObject *editor = window->findChild<QObject *>("sourceEditor");
+        QVERIFY(editor);
+        QCOMPARE(editor->property("text").toString(), QString());
+        QVERIFY(newEntry->property("highlighted").toBool());
+        QVERIFY(!oldEntry->property("highlighted").toBool());
+    }
+
 private:
+    static int visibleEntryCount(QQuickItem *item, const QString &name) {
+        int count = item->objectName() == name && item->isVisible() ? 1 : 0;
+        for (QQuickItem *child : item->childItems()) count += visibleEntryCount(child, name);
+        return count;
+    }
+    static QQuickItem *findVisualItem(QQuickItem *item, const QString &name) {
+        if (item->objectName() == name) return item;
+        for (QQuickItem *child : item->childItems())
+            if (QQuickItem *found = findVisualItem(child, name)) return found;
+        return nullptr;
+    }
     QTemporaryDir m_settingsDirectory;
 };
 
