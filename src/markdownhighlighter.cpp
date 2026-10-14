@@ -1,4 +1,5 @@
 #include "markdownhighlighter.h"
+#include "markdownstructure.h"
 
 #include <QColor>
 #include <QFont>
@@ -111,6 +112,8 @@ void MarkdownHighlighter::rebuildFormats() {
 }
 
 void MarkdownHighlighter::highlightBlock(const QString &text) {
+    const auto line = MarkdownStructure::fenceLine(text, previousBlockState());
+    setCurrentBlockState(line.nextState);
     if (!text.isEmpty()) {
         highlightMarkers(text);
         if (text.contains(QLatin1Char('`')) || text.contains(QLatin1Char('*'))
@@ -118,7 +121,29 @@ void MarkdownHighlighter::highlightBlock(const QString &text) {
             highlightInline(text);
         }
     }
+    if (!line.code)
+        highlightChecklist(text);
     highlightSearch(text);
+}
+
+void MarkdownHighlighter::highlightChecklist(const QString &text) {
+    const auto task = MarkdownStructure::checklist(text);
+    if (!task.hasMatch()) return;
+    QTextCharFormat marker = m_hiddenMarkerFormat;
+    QFont font = document()->defaultFont();
+    font.setPointSizeF(1.0);
+    font.setLetterSpacing(QFont::AbsoluteSpacing, 0);
+    const qreal naturalWidth = QFontMetricsF(font).horizontalAdvance(task.captured(2));
+    marker.setFontLetterSpacing((MarkdownStructure::checkboxWidth(document()->defaultFont()) - naturalWidth) / 3);
+    setFormat(task.capturedStart(2), 3, marker);
+    if (task.captured(3).compare(QLatin1String("x"), Qt::CaseInsensitive) == 0) {
+        for (int i = task.capturedEnd(); i < text.size(); ++i) {
+            QTextCharFormat checked = format(i);
+            checked.setFontStrikeOut(true);
+            checked.setForeground(m_markerFormat.foreground());
+            setFormat(i, 1, checked);
+        }
+    }
 }
 
 void MarkdownHighlighter::highlightSearch(const QString &text) {
@@ -169,7 +194,7 @@ void MarkdownHighlighter::highlightMarkers(const QString &text) {
     if (firstChar == QLatin1Char('-') || firstChar == QLatin1Char('+')
             || firstChar == QLatin1Char('*') || firstChar.isDigit()) {
         static const QRegularExpression listRe(
-            QStringLiteral("^(\\s*(?:[-+*]|\\d+[.)])\\s+)(.*)$"));
+            QStringLiteral("^(\\s*(?:[-+*]|\\d+(?:\\.\\d+)*[.)])\\s+)(.*)$"));
         const QRegularExpressionMatch list = listRe.match(text);
         if (list.hasMatch())
             setFormat(0, list.capturedLength(1), m_markerFormat);

@@ -12,6 +12,7 @@ SOURCES += \
 HEADERS += \
     ../src/explorer.h \
     ../src/backend.h \
+    ../src/markdownstructure.h \
     ../src/markdownhighlighter.h
 
 QT += widgets printsupport quickcontrols2 quickdialogs2 dbus

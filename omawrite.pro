@@ -7,6 +7,7 @@ TEMPLATE = app
 HEADERS += \
     src/explorer.h \
     src/backend.h \
+    src/markdownstructure.h \
     src/markdownhighlighter.h \
     src/systemtheme.h
 

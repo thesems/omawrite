@@ -38,6 +38,7 @@ protected:
 
 private:
     void rebuildFormats();
+    void highlightChecklist(const QString &text);
     void highlightMarkers(const QString &text);
     void highlightInline(const QString &text);
     void highlightSearch(const QString &text);

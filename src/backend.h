@@ -18,6 +18,7 @@ class QLockFile;
 
 class Backend : public QObject {
     Q_OBJECT
+    Q_PROPERTY(QVariantList checklistItems READ checklistItems NOTIFY checklistItemsChanged)
     Q_PROPERTY(QUrl fileUrl READ fileUrl NOTIFY fileUrlChanged)
     Q_PROPERTY(QString fileName READ fileName NOTIFY fileUrlChanged)
     Q_PROPERTY(bool modified READ modified NOTIFY modifiedChanged)
@@ -38,6 +39,7 @@ public:
 
     void setParentWindow(QWindow *window);
 
+    QVariantList checklistItems() const { return m_checklistItems; }
     QUrl fileUrl() const { return m_fileUrl; }
     QString fileName() const;
 
@@ -79,6 +81,10 @@ public:
     Q_INVOKABLE QString clipboardUrl() const;
     Q_INVOKABLE QString clipboardText() const;
     Q_INVOKABLE bool editorTextChanged();
+    Q_INVOKABLE QVariantMap checklistAt(int position) const;
+    Q_INVOKABLE bool isCodeBlockAt(int position) const;
+    Q_INVOKABLE QVariantMap toggleChecklist(int start, int end);
+    Q_INVOKABLE QVariantMap renumberList(int start, int end);
     Q_INVOKABLE QVariantMap indentList(int start, int end, bool outdent);
     Q_INVOKABLE QVariantList hiddenRangesAt(int position) const;
     Q_INVOKABLE void setSearchHighlight(const QString &query, int currentMatchStart);
@@ -88,6 +94,7 @@ public:
     Q_INVOKABLE void documentFontChanged();
 
 signals:
+    void checklistItemsChanged();
     void fileUrlChanged();
     void documentOpened();
     void modifiedChanged();
@@ -125,6 +132,7 @@ private:
     void loadOmarchyTheme();
     void watchOmarchyTheme();
 
+    QVariantList m_checklistItems;
     QUrl m_fileUrl;
     bool m_modified = false;
     QString m_status;

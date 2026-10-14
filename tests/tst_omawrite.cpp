@@ -218,6 +218,200 @@ private slots:
         QCOMPARE(editor->property("text").toString(), QString("- Parent\n  - Child\nAfter"));
     }
 
+    void hierarchicalListKeyboardControls() {
+        Backend backend;
+        Explorer explorer;
+        QQmlEngine engine;
+        engine.rootContext()->setContextProperty("backend", &backend);
+        engine.rootContext()->setContextProperty("explorer", &explorer);
+        QQmlComponent component(&engine, QUrl::fromLocalFile(QFINDTESTDATA("../src/Main.qml")));
+        QScopedPointer<QObject> object(component.create());
+        auto *window = qobject_cast<QQuickWindow *>(object.data());
+        QVERIFY2(window, qPrintable(component.errorString()));
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        QObject *editor = window->findChild<QObject *>("sourceEditor");
+        QVERIFY(editor);
+        const QString source = "1. Parent\n2. Child\n3. Next";
+        editor->setProperty("text", source);
+        editor->setProperty("cursorPosition", 18);
+        QTest::keyClick(window, Qt::Key_Tab);
+        QCOMPARE(editor->property("text").toString(), QString("1. Parent\n    1.1. Child\n2. Next"));
+        QCOMPARE(editor->property("cursorPosition").toInt(), 24);
+        QTest::keyClick(window, Qt::Key_Z, Qt::ControlModifier);
+        QCOMPARE(editor->property("text").toString(), source);
+        QTest::keyClick(window, Qt::Key_Z, Qt::ControlModifier | Qt::ShiftModifier);
+        editor->setProperty("cursorPosition", 24);
+        QTest::keyClick(window, Qt::Key_Return);
+        QCOMPARE(editor->property("text").toString(), QString("1. Parent\n    1.1. Child\n    1.2. \n2. Next"));
+        QVERIFY(QMetaObject::invokeMethod(editor, "replaceSelectionWith", Q_ARG(QVariant, QVariant("Grandchild"))));
+        QTest::keyClick(window, Qt::Key_Tab);
+        QCOMPARE(editor->property("text").toString(), QString("1. Parent\n    1.1. Child\n        1.1.1. Grandchild\n2. Next"));
+        QTest::keyClick(window, Qt::Key_Tab, Qt::ShiftModifier);
+        QCOMPARE(editor->property("text").toString(), QString("1. Parent\n    1.1. Child\n    1.2. Grandchild\n2. Next"));
+        QTest::keyClick(window, Qt::Key_Tab, Qt::ShiftModifier);
+        QCOMPARE(editor->property("text").toString(), QString("1. Parent\n    1.1. Child\n2. Grandchild\n3. Next"));
+        // Numbered checklists share hierarchy, and fenced examples stay literal.
+        editor->setProperty("text", "3) Parent\n4) [x] Task\n```\n    9. Example\n```");
+        editor->setProperty("cursorPosition", 21);
+        QTest::keyClick(window, Qt::Key_Tab);
+        QCOMPARE(editor->property("text").toString(), QString("3) Parent\n    3.1) [x] Task\n```\n    9. Example\n```"));
+        QTest::keyClick(window, Qt::Key_Return);
+        QCOMPARE(editor->property("text").toString(), QString("3) Parent\n    3.1) [x] Task\n    3.2) [ ] \n```\n    9. Example\n```"));
+    }
+
+    void checklistsKeepCodeAndInlineFormattingIntact() {
+        const QString text = "- [x] **bold** and [link](https://example.com)\n"
+                             "  2. [X] Nested numbered task\n"
+                             "- [ ] Unchecked\n"
+                             "- [x]not a task\n"
+                             "````\n- [x] Code\n```\n- [x] Still code\n````\n"
+                             "~~~\n- [x] Tilde code\n~~~\n- [x] After code";
+        QTextDocument document(text);
+        MarkdownHighlighter highlighter(&document);
+        highlighter.rehighlight();
+        const auto formatAt = [](const QTextBlock &block, int position) {
+            for (const auto &range : block.layout()->formats())
+                if (position >= range.start && position < range.start + range.length)
+                    return range.format;
+            return QTextCharFormat();
+        };
+        const auto first = document.begin();
+        const auto bold = formatAt(first, first.text().indexOf("bold"));
+        QVERIFY(bold.fontStrikeOut());
+        QCOMPARE(bold.fontWeight(), int(QFont::Bold));
+        const auto link = formatAt(first, first.text().indexOf("link"));
+        QVERIFY(link.fontStrikeOut());
+        QVERIFY(link.fontUnderline());
+        QVERIFY(formatAt(first.next(), 10).fontStrikeOut());
+        for (int line : {2, 3, 5, 7, 10})
+            QVERIFY(!formatAt(document.findBlockByNumber(line), 6).fontStrikeOut());
+        QVERIFY(formatAt(document.findBlockByNumber(12), 6).fontStrikeOut());
+        // Removing an opening fence propagates checklist formatting downstream.
+        QTextCursor cursor(&document);
+        cursor.setPosition(document.findBlockByNumber(4).position());
+        cursor.setPosition(document.findBlockByNumber(5).position(), QTextCursor::KeepAnchor);
+        cursor.removeSelectedText();
+        highlighter.rehighlight();
+        QVERIFY(formatAt(document.findBlockByNumber(4), 6).fontStrikeOut());
+    }
+
+    void interactiveChecklistsClickContinueAndUndo() {
+        Backend backend;
+        Explorer explorer;
+        QQmlEngine engine;
+        engine.rootContext()->setContextProperty("backend", &backend);
+        engine.rootContext()->setContextProperty("explorer", &explorer);
+        QQmlComponent component(&engine, QUrl::fromLocalFile(QFINDTESTDATA("../src/Main.qml")));
+        QScopedPointer<QObject> object(component.create());
+        auto *window = qobject_cast<QQuickWindow *>(object.data());
+        QVERIFY2(window, qPrintable(component.errorString()));
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        QObject *editor = window->findChild<QObject *>("sourceEditor");
+        QVERIFY(editor);
+        const QString source = "- [ ] Parent task with enough words to wrap across the writing column many times and test alignment\n"
+                               "    - [X] Child **bold** task\n3. [x] Numbered task\n"
+                               "```\n- [ ] Code\n```\n~~~\n- [x] More code\n~~~";
+        window->setWidth(760);
+        editor->setProperty("text", source);
+        auto *document = editor->property("textDocument").value<QQuickTextDocument *>()->textDocument();
+        QTRY_COMPARE(backend.checklistItems().size(), 3);
+        QTRY_VERIFY(document->firstBlock().layout()->lineCount() > 1);
+        const auto child = backend.checklistItems().at(1).toMap();
+        const int marker = child.value("position").toInt();
+        const int content = child.value("contentStart").toInt();
+        const auto ranges = backend.hiddenRangesAt(marker);
+        bool hidesCheckbox = false;
+        for (const auto &range : ranges) {
+            const auto span = range.toMap();
+            if (span.value("start").toInt() == marker && span.value("end").toInt() == marker + 3)
+                hidesCheckbox = true;
+        }
+        QVERIFY(hidesCheckbox);
+        QVERIFY(backend.checklistAt(document->findBlockByNumber(4).position()).isEmpty());
+        QVERIFY(backend.toggleChecklist(document->findBlockByNumber(4).position(),
+                                        document->findBlockByNumber(4).position()).isEmpty());
+        QQuickItem *box = nullptr;
+        const QString boxName = "checklistBox:" + QString::number(marker);
+        QTRY_VERIFY((box = findVisualItem(window->contentItem(), boxName)));
+        QCoreApplication::processEvents();
+        const auto block = document->findBlock(marker);
+        const qreal contentX = block.layout()->lineAt(0).cursorToX(content - block.position());
+        QTRY_VERIFY(box->x() + box->width() <= contentX + 1);
+        QVERIFY(block.blockFormat().leftMargin() > document->firstBlock().blockFormat().leftMargin());
+        editor->setProperty("cursorPosition", content + 2);
+        document->clearUndoRedoStacks();
+        const QPoint target = box->mapToScene(QPointF(box->width() / 2, box->height() / 2)).toPoint();
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, target);
+        QString unchecked = source;
+        unchecked[marker + 1] = QLatin1Char(' ');
+        QTRY_COMPARE(editor->property("text").toString(), unchecked);
+        QCOMPARE(editor->property("cursorPosition").toInt(), content + 2);
+        QTest::keyClick(window, Qt::Key_Z, Qt::ControlModifier);
+        QCOMPARE(editor->property("text").toString(), source);
+        QTest::keyClick(window, Qt::Key_Z, Qt::ControlModifier | Qt::ShiftModifier);
+        QCOMPARE(editor->property("text").toString(), unchecked);
+        QTest::keyClick(window, Qt::Key_L, Qt::ControlModifier);
+        QVERIFY(editor->property("text").toString().contains("    - [x] Child"));
+        // Enter carries nesting but resets the new task to unchecked.
+        editor->setProperty("text", "    - [x] Done");
+        editor->setProperty("cursorPosition", 14);
+        QTest::keyClick(window, Qt::Key_Return);
+        QCOMPARE(editor->property("text").toString(), QString("    - [x] Done\n    - [ ] "));
+        QTest::keyClick(window, Qt::Key_Return);
+        QCOMPARE(editor->property("text").toString(), QString("    - [x] Done\n\n"));
+        editor->setProperty("text", "3. [X] Done");
+        editor->setProperty("cursorPosition", 11);
+        QTest::keyClick(window, Qt::Key_Return);
+        QCOMPARE(editor->property("text").toString(), QString("3. [X] Done\n4. [ ] "));
+        // Creating tasks preserves a content selection and can be undone once.
+        editor->setProperty("text", "- Plain task");
+        QVERIFY(QMetaObject::invokeMethod(editor, "select", Q_ARG(int, 2), Q_ARG(int, 7)));
+        document->clearUndoRedoStacks();
+        QTest::keyClick(window, Qt::Key_L, Qt::ControlModifier);
+        QCOMPARE(editor->property("text").toString(), QString("- [ ] Plain task"));
+        QCOMPARE(editor->property("selectionStart").toInt(), 6);
+        QCOMPARE(editor->property("selectionEnd").toInt(), 11);
+        QTest::keyClick(window, Qt::Key_Z, Qt::ControlModifier);
+        QCOMPARE(editor->property("text").toString(), QString("- Plain task"));
+        // A group of tasks is changed atomically, leaving ordinary prose alone.
+        const QString group = "- First\n    - [x] Second\nAfter";
+        editor->setProperty("text", group);
+        QVERIFY(QMetaObject::invokeMethod(editor, "select", Q_ARG(int, 0), Q_ARG(int, group.size())));
+        document->clearUndoRedoStacks();
+        QTest::keyClick(window, Qt::Key_L, Qt::ControlModifier);
+        QCOMPARE(editor->property("text").toString(), QString("- [ ] First\n    - [ ] Second\nAfter"));
+        QTest::keyClick(window, Qt::Key_Z, Qt::ControlModifier);
+        QCOMPARE(editor->property("text").toString(), group);
+        // Tabs in the indentation or marker gap use the same wrapping columns.
+        editor->setProperty("text", "\t- [ ]\tTask");
+        QTRY_COMPARE(backend.checklistItems().size(), 1);
+        QCoreApplication::processEvents();
+        const int taskContent = backend.checklistItems().first().toMap().value("contentStart").toInt();
+        const auto taskBlock = document->firstBlock();
+        QVERIFY(qAbs(taskBlock.blockFormat().leftMargin()
+                     - taskBlock.layout()->lineAt(0).cursorToX(taskContent)) < 2);
+        // The bracket is skipped as a unit by the arrow keys.
+        editor->setProperty("text", "- [ ] Task");
+        editor->setProperty("cursorPosition", 2);
+        QTest::keyClick(window, Qt::Key_Right);
+        QCOMPARE(editor->property("cursorPosition").toInt(), 5);
+        QTest::keyClick(window, Qt::Key_Left);
+        QCOMPARE(editor->property("cursorPosition").toInt(), 2);
+        QTest::keyClick(window, Qt::Key_Tab);
+        QCOMPARE(editor->property("text").toString(), QString("    - [ ] Task"));
+        QTRY_COMPARE(backend.checklistItems().first().toMap().value("position").toInt(), 6);
+        backend.setTextScale(1.5);
+        QTRY_VERIFY((box = findVisualItem(window->contentItem(), "checklistBox:6")));
+        QTRY_COMPARE(box->width(), 21.6);
+        // Saved files retain portable Markdown task syntax.
+        QTemporaryDir directory;
+        const QUrl saved = QUrl::fromLocalFile(directory.filePath("tasks.md"));
+        backend.saveAs(saved);
+        QFile file(saved.toLocalFile());
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        QCOMPARE(file.readAll(), QByteArray("    - [ ] Task"));
+    }
+
     void loadsCurrentOmarchyTheme() {
         QTemporaryDir homeDirectory;
         QVERIFY(homeDirectory.isValid());
@@ -555,9 +749,25 @@ private slots:
         QObject *sidebar = window->findChild<QObject *>("explorerSidebar");
         QVERIFY(sidebar);
         QCOMPARE(sidebar->property("selectedUrl").toUrl(), explorer.folderUrl());
+        QTRY_COMPARE(menu->property("count").toInt(), 2);
+        QTRY_VERIFY(!window->findChild<QObject *>("deleteEntryMenuItem"));
+        QVERIFY(!window->findChild<QObject *>("renameEntryMenuItem"));
+        QVERIFY(QMetaObject::invokeMethod(menu, "close"));
+        QTRY_VERIFY((source = findVisualItem(window->contentItem(), "entry:drag.md")));
+        const QPoint fileRow = source->mapToScene(QPointF(source->width() / 2, source->height() / 2)).toPoint();
+        QTest::mouseClick(window, Qt::RightButton, Qt::NoModifier, fileRow);
+        QTRY_VERIFY(menu->property("visible").toBool());
+        QTRY_COMPARE(menu->property("count").toInt(), 4);
+        QObject *renameItem = window->findChild<QObject *>("renameEntryMenuItem");
         QObject *deleteItem = window->findChild<QObject *>("deleteEntryMenuItem");
+        QVERIFY(renameItem);
         QVERIFY(deleteItem);
-        QVERIFY(!deleteItem->property("enabled").toBool());
+        QVERIFY(renameItem->property("enabled").toBool());
+        QVERIFY(deleteItem->property("enabled").toBool());
+        // Keyboard navigation reaches the same contextual actions.
+        QTest::keyClick(window, Qt::Key_Down);
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_VERIFY(!menu->property("visible").toBool());
     }
 
     void trashingOpenFileKeepsDraft_data() {

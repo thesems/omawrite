@@ -177,6 +177,13 @@ ApplicationWindow {
     }
 
     Shortcut {
+        sequence: "Ctrl+L"
+        context: Qt.WindowShortcut
+        enabled: editor.activeFocus
+        onActivated: editor.toggleChecklist()
+    }
+
+    Shortcut {
         sequence: "Ctrl+K"
         context: Qt.WindowShortcut
         onActivated: editor.insertLink()
@@ -357,7 +364,7 @@ ApplicationWindow {
         standardButtons: Dialog.Close
         anchors.centerIn: parent
         contentItem: Label {
-            text: "Ctrl+E  Toggle Explorer\nCtrl+S  Save\nCtrl+Shift+S  Save As\nCtrl+O  Open\nCtrl+N  New Window\nCtrl+F  Find\nCtrl+H  Find and Replace\nCtrl+B  Bold\nCtrl+I  Italic\nCtrl+K  Link\nCtrl+P  Print\nF11 / Super+F  Fullscreen\nCtrl+?  Shortcuts"
+            text: "Ctrl+E  Toggle Explorer\nCtrl+S  Save\nCtrl+Shift+S  Save As\nCtrl+O  Open\nCtrl+N  New Window\nCtrl+F  Find\nCtrl+H  Find and Replace\nCtrl+B  Bold\nCtrl+I  Italic\nCtrl+K  Link\nCtrl+L  Toggle checklist\nCtrl+P  Print\nF11 / Super+F  Fullscreen\nCtrl+?  Shortcuts"
             lineHeight: 1.5
         }
     }
@@ -599,7 +606,16 @@ ApplicationWindow {
                     color: win.strongTextColor
                 }
                 onCursorRectangleChanged: editorFlick.ensureCursorVisible()
-                onFontChanged: backend.documentFontChanged()
+                property int checklistLayoutRevision: 0
+                function refreshChecklistLayout() {
+                    Qt.callLater(function() { editor.checklistLayoutRevision++; });
+                }
+                onFontChanged: {
+                    backend.documentFontChanged();
+                    refreshChecklistLayout();
+                }
+                onWidthChanged: refreshChecklistLayout()
+                onImplicitHeightChanged: refreshChecklistLayout()
 
                 function replaceSelectionWith(replacement) {
                     var start = Math.min(selectionStart, selectionEnd);
@@ -639,6 +655,26 @@ ApplicationWindow {
                     }
                 }
 
+                function toggleChecklist() {
+                    var range = backend.toggleChecklist(selectionStart, selectionEnd);
+                    if (range.start !== undefined)
+                        select(range.start, range.end);
+                }
+
+                function toggleChecklistAt(position) {
+                    var start = selectionStart;
+                    var end = selectionEnd;
+                    backend.toggleChecklist(position, position);
+                    select(start, end);
+                    forceActiveFocus();
+                }
+
+                function renumberCurrentList() {
+                    var range = backend.renumberList(cursorPosition, cursorPosition);
+                    if (range.start !== undefined)
+                        cursorPosition = range.start;
+                }
+
                 function smartReturn(softBreak) {
                     if (softBreak) {
                         replaceSelectionWith("\n");
@@ -646,13 +682,28 @@ ApplicationWindow {
                     }
                     var lineStart = text.lastIndexOf("\n", cursorPosition - 1) + 1;
                     var line = text.slice(lineStart, cursorPosition);
-                    var before = text.slice(0, cursorPosition);
-                    var fences = (before.match(/^\s*```/gm) || []).length;
-                    if ((fences % 2) === 1) {
+                    if (backend.isCodeBlockAt(cursorPosition)) {
                         replaceSelectionWith("\n");
                         return;
                     }
-                    var match = line.match(/^(\s*)([-+*]|\d+[.)]|>+)\s+(.*)$/);
+                    var task = backend.checklistAt(cursorPosition);
+                    if (task.position !== undefined && cursorPosition >= task.position + 3) {
+                        var prefix = text.slice(lineStart, task.position);
+                        var lineEnd = text.indexOf("\n", task.contentStart);
+                        if (lineEnd < 0) lineEnd = text.length;
+                        if (text.slice(task.contentStart, lineEnd).trim().length === 0) {
+                            EditorMutations.replaceRange(editor, lineStart, cursorPosition, "\n");
+                        } else {
+                            // Numbered tasks continue just like ordinary numbered lists.
+                            prefix = prefix.replace(/(\d+)([.)])([ \t]+)$/, function(_, number, marker, gap) {
+                                return (parseInt(number) + 1) + marker + gap;
+                            });
+                            replaceSelectionWith("\n" + prefix + "[ ] ");
+                            renumberCurrentList();
+                        }
+                        return;
+                    }
+                    var match = line.match(/^(\s*)([-+*]|\d+(?:\.\d+)*[.)]|>+)\s+(.*)$/);
                     if (match) {
                         if (match[3].length === 0) {
                             EditorMutations.replaceRange(editor, lineStart,
@@ -660,8 +711,11 @@ ApplicationWindow {
                         } else {
                             var marker = match[2];
                             if (/^\d/.test(marker))
-                                marker = (parseInt(marker) + 1) + marker.slice(-1);
+                                marker = marker.replace(/(\d+)([.)])$/, function(_, number, suffix) {
+                                    return (parseInt(number) + 1) + suffix;
+                                });
                             replaceSelectionWith("\n" + match[1] + marker + " ");
+                            renumberCurrentList();
                         }
                         return;
                     }
@@ -819,11 +873,78 @@ ApplicationWindow {
                 }
 
                 onTextChanged: {
+                    refreshChecklistLayout();
                     if (win.searchUpdating)
                         return;
                     var contentChanged = backend.editorTextChanged();
                     if (win.searchOpen && contentChanged)
                         win.updateSearch();
+                }
+
+                Repeater {
+                    model: backend.checklistItems
+                    delegate: Item {
+                        id: checklistBox
+                        required property var modelData
+                        objectName: "checklistBox:" + modelData.position
+                        readonly property real boxSize: Math.max(12, editor.font.pixelSize * 0.72)
+                        readonly property rect markerRect: {
+                            var revision = editor.checklistLayoutRevision;
+                            return editor.positionToRectangle(modelData.position);
+                        }
+                        readonly property rect lineRect: {
+                            var revision = editor.checklistLayoutRevision;
+                            return editor.positionToRectangle(modelData.lineStart);
+                        }
+                        x: markerRect.x
+                        y: lineRect.y + (lineRect.height - boxSize) / 2
+                        width: boxSize
+                        height: boxSize
+                        z: 10
+                        Accessible.role: Accessible.CheckBox
+                        Accessible.name: {
+                            var end = editor.text.indexOf("\n", modelData.contentStart);
+                            return editor.text.slice(modelData.contentStart, end < 0 ? editor.text.length : end) || "Checklist item";
+                        }
+                        Accessible.checkable: true
+                        Accessible.checked: modelData.checked
+                        Accessible.onPressAction: editor.toggleChecklistAt(modelData.position)
+
+                        Rectangle {
+                            anchors.fill: parent
+                            radius: Math.max(2, width * 0.15)
+                            color: modelData.checked ? win.textColor : "transparent"
+                            border.width: 1
+                            border.color: modelData.checked ? win.textColor : win.mutedColor
+                            Canvas {
+                                anchors.fill: parent
+                                visible: modelData.checked
+                                property color strokeColor: win.pageColor
+                                onStrokeColorChanged: requestPaint()
+                                onWidthChanged: requestPaint()
+                                onHeightChanged: requestPaint()
+                                onVisibleChanged: requestPaint()
+                                onPaint: {
+                                    var context = getContext("2d");
+                                    context.clearRect(0, 0, width, height);
+                                    context.strokeStyle = strokeColor;
+                                    context.lineWidth = Math.max(1.5, width * 0.12);
+                                    context.lineCap = "round";
+                                    context.lineJoin = "round";
+                                    context.beginPath();
+                                    context.moveTo(width * 0.23, height * 0.5);
+                                    context.lineTo(width * 0.43, height * 0.7);
+                                    context.lineTo(width * 0.77, height * 0.3);
+                                    context.stroke();
+                                }
+                            }
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: editor.toggleChecklistAt(modelData.position)
+                        }
+                    }
                 }
 
                 Text {

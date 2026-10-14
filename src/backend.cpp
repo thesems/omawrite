@@ -34,29 +34,17 @@
 #include <algorithm>
 
 #include "markdownhighlighter.h"
+#include "markdownstructure.h"
 
 namespace {
-QRegularExpressionMatch listPrefix(const QString &text) {
-    static const QRegularExpression rule(QStringLiteral("^[ \t]{0,3}([-*_])(?:[ \t]*\\1){2,}[ \t]*$"));
-    static const QRegularExpression list(QStringLiteral("^([ \t]*)(?:[-+*]|\\d{1,9}[.)])[ \t]+"));
-    return rule.match(text).hasMatch() ? QRegularExpressionMatch() : list.match(text);
-}
+using MarkdownStructure::listPrefix;
 
-// Track fences so source examples never acquire list layout or Tab behavior.
 bool updateFence(const QString &text, QChar &fence, int &length) {
-    static const QRegularExpression marker(QStringLiteral("^[ \t]*(`{3,}|~{3,})(.*)$"));
-    const auto match = marker.match(text);
-    if (!match.hasMatch()) return !fence.isNull();
-    const QString run = match.captured(1);
-    if (fence.isNull()) {
-        if (run.front() == QLatin1Char('`') && match.captured(2).contains(QLatin1Char('`')))
-            return false;
-        fence = run.front();
-        length = run.size();
-    } else if (run.front() == fence && run.size() >= length && match.captured(2).trimmed().isEmpty()) {
-        fence = QChar();
-    }
-    return true;
+    const int state = fence.isNull() ? 0 : (length << 1) | int(fence == QLatin1Char('~'));
+    const auto line = MarkdownStructure::fenceLine(text, state);
+    length = line.nextState >> 1;
+    fence = line.nextState == 0 ? QChar() : QLatin1Char((line.nextState & 1) ? '~' : '`');
+    return line.code;
 }
 }
 
@@ -432,6 +420,11 @@ QVariantList Backend::hiddenRangesAt(int position) const {
 
     const int lineStart = block.position();
     QList<QPair<int, int>> spans;
+    const auto task = checklistAt(position);
+    if (!task.isEmpty()) {
+        const int marker = task.value(QStringLiteral("position")).toInt();
+        spans.append({marker, marker + 3});
+    }
     const QList<MarkdownHighlighter::InlineMarkup> markup =
         MarkdownHighlighter::inlineMarkup(block.text());
     for (const MarkdownHighlighter::InlineMarkup &item : markup) {
@@ -855,8 +848,18 @@ void Backend::refreshDocumentTypography() {
         option.setTabStopDistance(tabWidth);
         m_document->setDefaultTextOption(option);
     }
+    const auto advance = [&metrics, tabWidth](const QString &text, qreal width) {
+        for (QChar character : text) {
+            if (character == QLatin1Char('\t'))
+                width = (qFloor(width / tabWidth) + 1) * tabWidth;
+            else
+                width += metrics.horizontalAdvance(character);
+        }
+        return width;
+    };
     QChar fence;
     int fenceLength = 0;
+    QVariantList tasks;
     QTextCursor cursor(m_document);
     // A fence edit can change later blocks, so scan the document but only
     // update changed formats. Join the text edit to keep undo atomic.
@@ -866,13 +869,18 @@ void Backend::refreshDocumentTypography() {
         const bool inFence = updateFence(text, fence, fenceLength);
         const auto prefix = inFence ? QRegularExpressionMatch() : listPrefix(text);
         qreal prefixWidth = 0;
-        if (prefix.hasMatch()) {
-            for (QChar character : prefix.captured()) {
-                if (character == QLatin1Char('\t'))
-                    prefixWidth = (qFloor(prefixWidth / tabWidth) + 1) * tabWidth;
-                else
-                    prefixWidth += metrics.horizontalAdvance(character);
-            }
+        if (prefix.hasMatch())
+            prefixWidth = advance(prefix.captured(), 0);
+        const auto task = inFence ? QRegularExpressionMatch() : MarkdownStructure::checklist(text);
+        if (task.hasMatch()) {
+            prefixWidth += MarkdownStructure::checkboxWidth(m_document->defaultFont());
+            prefixWidth = advance(task.captured(4), prefixWidth);
+            tasks.append(QVariantMap{
+                {QStringLiteral("lineStart"), block.position()},
+                {QStringLiteral("position"), block.position() + task.capturedStart(2)},
+                {QStringLiteral("contentStart"), block.position() + task.capturedEnd()},
+                {QStringLiteral("checked"), task.captured(3).compare(QLatin1String("x"), Qt::CaseInsensitive) == 0}
+            });
         }
         // Keep literal Markdown on the first line; wrapped text starts beneath
         // the item content, including the indentation of nested items.
@@ -889,6 +897,148 @@ void Backend::refreshDocumentTypography() {
     }
     cursor.endEditBlock();
     m_formattingTypography = false;
+    if (m_checklistItems != tasks) {
+        m_checklistItems = tasks;
+        emit checklistItemsChanged();
+    }
+}
+
+QVariantMap Backend::checklistAt(int position) const {
+    if (!m_document) return {};
+    const int lineStart = m_document->findBlock(position).position();
+    for (const auto &value : m_checklistItems) {
+        const auto item = value.toMap();
+        if (item.value(QStringLiteral("lineStart")).toInt() == lineStart) return item;
+    }
+    return {};
+}
+
+bool Backend::isCodeBlockAt(int position) const {
+    if (!m_document) return false;
+    int state = 0;
+    const auto target = m_document->findBlock(position);
+    for (auto block = m_document->begin(); block.isValid(); block = block.next()) {
+        const auto line = MarkdownStructure::fenceLine(block.text(), state);
+        if (block == target) return line.code;
+        state = line.nextState;
+    }
+    return false;
+}
+
+QVariantMap Backend::toggleChecklist(int start, int end) {
+    if (!m_document) return {};
+    start = qBound(0, start, m_document->characterCount() - 1);
+    end = qBound(start, end, m_document->characterCount() - 1);
+    const auto first = m_document->findBlock(start);
+    const auto last = m_document->findBlock(end > start ? end - 1 : end);
+    struct Edit { int position; int length; QString text; };
+    QList<Edit> edits;
+    int state = 0;
+    for (auto block = m_document->begin(); block.isValid(); block = block.next()) {
+        const auto line = MarkdownStructure::fenceLine(block.text(), state);
+        state = line.nextState;
+        if (block.position() > last.position()) break;
+        if (block.position() < first.position() || line.code) continue;
+        const auto prefix = listPrefix(block.text());
+        if (!prefix.hasMatch()) continue;
+        const auto task = MarkdownStructure::checklist(block.text());
+        if (task.hasMatch()) {
+            const bool checked = task.captured(3).compare(QLatin1String("x"), Qt::CaseInsensitive) == 0;
+            edits.append({block.position() + int(task.capturedStart(3)), 1,
+                          checked ? QStringLiteral(" ") : QStringLiteral("x")});
+        } else {
+            edits.append({block.position() + int(prefix.capturedEnd()), 0, QStringLiteral("[ ] ")});
+        }
+    }
+    if (edits.isEmpty()) return {};
+    QTextCursor cursor(m_document);
+    cursor.beginEditBlock();
+    int adjustedStart = start, adjustedEnd = end;
+    for (auto it = edits.crbegin(); it != edits.crend(); ++it) {
+        cursor.setPosition(it->position);
+        cursor.setPosition(it->position + it->length, QTextCursor::KeepAnchor);
+        cursor.insertText(it->text);
+        const int delta = it->text.size() - it->length;
+        if (it->position <= start) adjustedStart += delta;
+        if (it->position <= end) adjustedEnd += delta;
+    }
+    cursor.endEditBlock();
+    return {{QStringLiteral("start"), adjustedStart}, {QStringLiteral("end"), adjustedEnd}};
+}
+
+QVariantMap Backend::renumberList(int start, int end) {
+    if (!m_document) return {};
+    struct Level { int indent; int number; QString path; };
+    struct Edit { int position; int length; QString marker; };
+    QList<Level> levels;
+    QList<Edit> edits;
+    QList<Edit> replacements;
+    int groupStart = -1;
+    QChar fence;
+    int fenceLength = 0;
+    int adjustedStart = start, adjustedEnd = end;
+    const auto flush = [&](int groupEnd) {
+        if (groupStart >= 0 && start < groupEnd && end >= groupStart)
+            replacements.append(edits);
+        edits.clear();
+        levels.clear();
+        groupStart = -1;
+    };
+    for (QTextBlock block = m_document->begin(); block.isValid(); block = block.next()) {
+        const QString text = block.text();
+        const bool inFence = updateFence(text, fence, fenceLength);
+        const auto prefix = inFence ? QRegularExpressionMatch() : listPrefix(text);
+        if (!prefix.hasMatch()) {
+            if (!inFence && groupStart >= 0 && (text.trimmed().isEmpty()
+                    || text.startsWith(QLatin1Char(' ')) || text.startsWith(QLatin1Char('\t'))))
+                continue;
+            flush(block.position());
+            continue;
+        }
+        if (groupStart < 0) groupStart = block.position();
+        int indent = 0;
+        for (QChar c : prefix.captured(1))
+            indent = c == QLatin1Char('\t') ? (indent / 4 + 1) * 4 : indent + 1;
+        while (!levels.isEmpty() && levels.last().indent > indent) levels.removeLast();
+        const QString marker = prefix.captured(2);
+        const bool numbered = marker.front().isDigit();
+        int number = 0;
+        if (!levels.isEmpty() && levels.last().indent == indent) {
+            const auto previous = levels.takeLast();
+            if (numbered && previous.number > 0) number = previous.number + 1;
+        }
+        if (numbered && number == 0)
+            number = levels.isEmpty() ? marker.section(QLatin1Char('.'), 0, 0)
+                .remove(QLatin1Char(')')).toInt() : 1;
+        QString path;
+        if (numbered) {
+            const QString parent = levels.isEmpty() ? QString() : levels.last().path;
+            path = parent.isEmpty() ? QString::number(number) : parent + QLatin1Char('.') + QString::number(number);
+            const QString replacement = path + marker.back();
+            if (replacement != marker)
+                edits.append({block.position() + int(prefix.capturedStart(2)), int(marker.size()), replacement});
+        }
+        levels.append({indent, number, path});
+    }
+    flush(m_document->characterCount());
+    // Apply from the end after scanning to preserve all source positions.
+    QTextCursor cursor(m_document);
+    cursor.joinPreviousEditBlock();
+    for (auto it = replacements.crbegin(); it != replacements.crend(); ++it) {
+        cursor.setPosition(it->position);
+        cursor.setPosition(it->position + it->length, QTextCursor::KeepAnchor);
+        cursor.insertText(it->marker);
+        const int delta = it->marker.size() - it->length;
+        const auto adjust = [&](int original, int &position) {
+            if (original >= it->position + it->length) position += delta;
+            else if (original > it->position)
+                position = it->position + qMin(original - it->position, int(it->marker.size()));
+        };
+        adjust(start, adjustedStart);
+        adjust(end, adjustedEnd);
+    }
+    cursor.endEditBlock();
+    return {{QStringLiteral("start"), adjustedStart}, {QStringLiteral("end"), adjustedEnd}};
 }
 
 QVariantMap Backend::indentList(int start, int end, bool outdent) {
@@ -898,6 +1048,7 @@ QVariantMap Backend::indentList(int start, int end, bool outdent) {
     const QTextBlock first = m_document->findBlock(start);
     const QTextBlock last = m_document->findBlock(end > start ? end - 1 : end);
     QList<QPair<int, int>> edits;
+    bool numbered = false;
     QChar fence;
     int fenceLength = 0;
     for (QTextBlock block = m_document->begin(); block.isValid(); block = block.next()) {
@@ -906,6 +1057,7 @@ QVariantMap Backend::indentList(int start, int end, bool outdent) {
         if (block.position() < first.position()) continue;
         const auto prefix = inFence ? QRegularExpressionMatch() : listPrefix(block.text());
         if (!prefix.hasMatch()) return {};
+        numbered = numbered || prefix.captured(2).front().isDigit();
         const QString indentation = prefix.captured(1);
         int removed = 0;
         if (outdent && !indentation.isEmpty()) {
@@ -931,6 +1083,8 @@ QVariantMap Backend::indentList(int start, int end, bool outdent) {
         if (it->first <= start) adjustedStart = qMax(it->first, adjustedStart + delta);
         if (it->first <= end) adjustedEnd = qMax(it->first, adjustedEnd + delta);
     }
+    const auto range = numbered ? renumberList(adjustedStart, adjustedEnd)
+        : QVariantMap{{QStringLiteral("start"), adjustedStart}, {QStringLiteral("end"), adjustedEnd}};
     cursor.endEditBlock();
-    return {{QStringLiteral("start"), adjustedStart}, {QStringLiteral("end"), adjustedEnd}};
+    return range;
 }

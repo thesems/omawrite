@@ -3,8 +3,12 @@
 Local fork of Omawrite with a themed folder/file explorer. The editor, settings,
 draft recovery, and unsaved-change prompts are retained.
 
-- Click the folder name to choose a workspace; the last folder is remembered.
+- Click the workspace name to choose a folder; the last folder is remembered.
+- The sidebar uses plain filenames, `/` suffixes for folders, and a muted text
+  header. The open note uses the theme accent.
 - Right-click a file, folder, or empty explorer space to create files and folders.
+  The compact menu follows the Omarchy theme; empty space shows only creation
+  actions.
 - Right-click an entry to rename it. Delete file and Delete folder move entries
   (including a folder's contents) to the system Trash.
 - Drag entries onto folders to move them. Drop onto **Move to top level**, the
@@ -48,6 +52,8 @@ QT_QPA_PLATFORM=offscreen QT_QPA_PLATFORMTHEME=basic QT_QUICK_BACKEND=software .
 The checks cover file creation, duplicate protection, renames, moves, trashing an
 open document, drag-and-drop into and out of a folder, the empty-space context
 menu, unsaved changes when switching files, and row mapping after file insertion.
+Checklist checks cover click/keyboard toggles, undo, nesting, wrapping, font scaling,
+fenced examples, inline formatting, and saving portable Markdown syntax.
 
 ---
 
@@ -76,8 +82,15 @@ Install via the Omarchy Package Repository via the `omawrite` package. It's inst
 - `Ctrl+H` opens find and replace.
 - `Ctrl+B`, `Ctrl+I`, and `Ctrl+K` insert bold, italic, and link Markdown.
 - `Tab` / `Shift+Tab` indent / outdent list items by four spaces, including selected
-  groups. Enter continues the current list indentation. Nested bullet and numbered
-  lists keep their source markers; wrapped lines align beneath the item text.
+  groups. Enter continues the current list indentation. Nested numbered
+  lists use hierarchical numbers (`1.1.`, `1.2.`, `1.1.1.`). Enter continues
+  the current level; indenting or outdenting renumbers the surrounding list in one
+  undoable edit. Wrapped lines align beneath the item text.
+- `Ctrl+L` creates or toggles Markdown checklist items (`- [ ]` / `- [x]`).
+  Click a checkbox to toggle it without moving the caret. Checked items are dimmed
+  and struck through; Enter continues an unchecked task at the same nesting level.
+  Numbered tasks and selected groups are supported. Checklist markers in fenced
+  examples stay literal.
 - `Ctrl+?` shows the keyboard shortcut reference.
 
 Unsaved drafts are recovered after an abnormal exit. Omawrite also watches open files

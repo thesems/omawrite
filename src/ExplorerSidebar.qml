@@ -11,7 +11,7 @@ Rectangle {
     property bool selectedDirectory: false
     property bool dragging: false
     signal openFile(url file)
-    color: Qt.tint(window.pageColor, window.darkMode ? "#0affffff" : "#08000000")
+    color: window.pageColor
 
     component SidebarButton: Button {
         id: button
@@ -101,55 +101,37 @@ Rectangle {
 
     ColumnLayout {
         anchors.fill: parent
-        anchors.margins: window.scaledSize(12)
-        spacing: window.scaledSize(6)
+        spacing: 0
 
-        SidebarButton {
-            text: explorer.folderName
+        Item {
+            objectName: "workspaceHeader"
             Layout.fillWidth: true
-            topPadding: 0
-            bottomPadding: 0
-            leftPadding: window.scaledSize(12)
-            rightPadding: window.scaledSize(12)
-            topInset: 0
-            bottomInset: 0
-            onClicked: folderDialog.open()
-            ToolTip.visible: hovered
-            ToolTip.text: "Choose folder · Drop files here to move to the top level"
-            TapHandler {
-                acceptedButtons: Qt.RightButton
-                onTapped: sidebar.rootMenu()
+            implicitHeight: window.scaledSize(40)
+            Label {
+                anchors.fill: parent
+                anchors.leftMargin: window.scaledSize(12)
+                anchors.rightMargin: window.scaledSize(13)
+                text: explorer.folderName + "/"
+                color: workspaceMouse.containsMouse ? window.textColor : window.mutedColor
+                font.family: backend.editorFont
+                font.pixelSize: window.scaledSize(12)
+                verticalAlignment: Text.AlignVCenter
+                elide: Text.ElideMiddle
             }
-            contentItem: Item {
-                Label {
-                    anchors.fill: parent
-                    anchors.rightMargin: window.scaledSize(24)
-                    text: explorer.folderName
-                    color: window.textColor
-                    font.pixelSize: window.scaledSize(13)
-                    elide: Text.ElideMiddle
-                    verticalAlignment: Text.AlignVCenter
-                }
-                Canvas {
-                    anchors.right: parent.right
-                    anchors.verticalCenter: parent.verticalCenter
-                    width: window.scaledSize(12)
-                    height: window.scaledSize(12)
-                    property color strokeColor: window.textColor
-                    onStrokeColorChanged: requestPaint()
-                    onPaint: {
-                        var context = getContext("2d");
-                        context.clearRect(0, 0, width, height);
-                        context.strokeStyle = strokeColor;
-                        context.lineWidth = 1.5;
-                        context.beginPath();
-                        context.moveTo(2, height * 0.35);
-                        context.lineTo(width / 2, height * 0.7);
-                        context.lineTo(width - 2, height * 0.35);
-                        context.stroke();
-                    }
+            MouseArea {
+                id: workspaceMouse
+                anchors.fill: parent
+                acceptedButtons: Qt.LeftButton | Qt.RightButton
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: function(mouse) {
+                    if (mouse.button === Qt.RightButton) sidebar.rootMenu();
+                    else folderDialog.open();
                 }
             }
+            ToolTip.visible: workspaceMouse.containsMouse
+            ToolTip.delay: 600
+            ToolTip.text: "Choose workspace · Drop files here to move to the top level"
             DropArea {
                 anchors.fill: parent
                 keys: ["omawrite-entry"]
@@ -157,9 +139,8 @@ Rectangle {
                 Rectangle {
                     anchors.fill: parent
                     visible: parent.containsDrag
-                    color: "transparent"
-                    border.color: backend.themeAccent
-                    radius: 4
+                    color: window.selectionFill
+                    opacity: 0.25
                 }
             }
         }
@@ -199,37 +180,30 @@ Rectangle {
                 objectName: "entry:" + fileName
                 readonly property url entryUrl: explorer.urlForPath(filePath)
                 readonly property bool folder: explorer.isDirectory(filePath)
-                readonly property bool unsaved: !folder && entryUrl === backend.fileUrl && backend.modified
                 implicitWidth: tree.width
-                implicitHeight: window.scaledSize(34)
+                implicitHeight: window.scaledSize(26)
+                leftPadding: window.scaledSize(12) + entry.depth * window.scaledSize(16)
+                rightPadding: window.scaledSize(12)
+                topPadding: 0
+                bottomPadding: 0
                 highlighted: entryUrl === sidebar.selectedUrl
                 background: Rectangle {
-                    radius: 4
-                    color: folderDrop.containsDrag || entry.highlighted ? window.selectionFill
-                         : dragMouse.containsMouse ? Qt.tint(sidebar.color, "#14ffffff") : "transparent"
-                    border.width: folderDrop.containsDrag ? 1 : 0
-                    border.color: backend.themeAccent
+                    color: window.selectionFill
+                    opacity: folderDrop.containsDrag ? 0.4
+                         : entry.highlighted ? 0.12 : dragMouse.containsMouse ? 0.2 : 0
                 }
-                contentItem: Row {
-                    leftPadding: entry.depth * window.scaledSize(16)
-                    spacing: window.scaledSize(6)
-                    Label {
-                        text: entry.folder ? (entry.expanded ? "▾" : "▸") : entry.unsaved ? "●" : "·"
-                        color: entry.folder || entry.unsaved ? backend.themeAccent : window.mutedColor
-                        width: window.scaledSize(12)
-                        anchors.verticalCenter: parent.verticalCenter
-                    }
-                    Label {
-                        text: entry.fileName
-                        color: window.textColor
-                        font.pixelSize: window.scaledSize(13)
-                        elide: Text.ElideRight
-                        width: Math.max(0, entry.width - entry.depth * window.scaledSize(16) - window.scaledSize(42))
-                        anchors.verticalCenter: parent.verticalCenter
-                    }
+                contentItem: Label {
+                    text: entry.fileName + (entry.folder ? "/" : "")
+                    color: !entry.folder && entry.entryUrl === backend.fileUrl ? backend.themeAccent
+                         : entry.folder ? window.mutedColor : window.textColor
+                    font.family: backend.editorFont
+                    font.pixelSize: window.scaledSize(13)
+                    elide: Text.ElideRight
+                    verticalAlignment: Text.AlignVCenter
                 }
                 MouseArea {
                     id: dragMouse
+                    z: 1
                     anchors.fill: parent
                     acceptedButtons: Qt.LeftButton | Qt.RightButton
                     hoverEnabled: true
@@ -279,10 +253,11 @@ Rectangle {
             Label {
                 anchors.centerIn: parent
                 visible: tree.rows === 0
-                text: "No notes yet\nCreate a file to start writing"
+                text: "Nothing here yet"
                 horizontalAlignment: Text.AlignHCenter
                 color: window.mutedColor
-                font.pixelSize: window.scaledSize(12)
+                font.family: backend.editorFont
+                font.pixelSize: window.scaledSize(13)
             }
         }
         Rectangle {
@@ -316,6 +291,8 @@ Rectangle {
         }
         Label {
             Layout.fillWidth: true
+            Layout.leftMargin: window.scaledSize(12)
+            Layout.rightMargin: window.scaledSize(12)
             text: explorer.error
             visible: text.length > 0
             wrapMode: Text.Wrap
@@ -333,28 +310,60 @@ Rectangle {
     Menu {
         id: entryMenu
         objectName: "explorerContextMenu"
-        MenuItem { text: "New file here"; onTriggered: sidebar.beginCreate(false) }
-        MenuItem { text: "New folder here"; onTriggered: sidebar.beginCreate(true) }
-        MenuSeparator {}
-        MenuItem {
-            text: "Rename"
-            enabled: sidebar.selectedUrl !== explorer.folderUrl
-            onTriggered: {
-                entryDialog.mode = "rename";
-                entryDialog.target = sidebar.selectedUrl;
-                entryName.text = explorer.nameForUrl(sidebar.selectedUrl);
-                entryDialog.open();
-            }
+        // Keep the popup in QML so desktop/native menus cannot override its theme.
+        popupType: Popup.Item
+        width: window.scaledSize(176)
+        padding: window.scaledSize(4)
+        overlap: 0
+        enter: Transition {}
+        exit: Transition {}
+        background: Rectangle {
+            color: window.pageColor
+            border.width: 1
+            border.color: Qt.rgba(window.mutedColor.r, window.mutedColor.g, window.mutedColor.b, 0.3)
         }
-        MenuSeparator {}
-        MenuItem {
-            text: sidebar.selectedDirectory ? "Delete folder" : "Delete file"
-            objectName: "deleteEntryMenuItem"
-            enabled: sidebar.selectedUrl !== explorer.folderUrl
-            onTriggered: {
-                deleteDialog.target = sidebar.selectedUrl;
-                deleteDialog.folder = sidebar.selectedDirectory;
-                deleteDialog.open();
+        Instantiator {
+            model: sidebar.selectedUrl.toString().length > 0 && sidebar.selectedUrl !== explorer.folderUrl ? 4 : 2
+            onObjectAdded: function(index, item) { entryMenu.insertItem(index, item); }
+            onObjectRemoved: function(index, item) { entryMenu.removeItem(item); }
+            delegate: MenuItem {
+                id: menuEntry
+                required property int index
+                objectName: index === 3 ? "deleteEntryMenuItem" : index === 2 ? "renameEntryMenuItem" : "createEntryMenuItem:" + index
+                text: ["New file", "New folder", "Rename", "Move to Trash"][index]
+                implicitHeight: window.scaledSize(26)
+                leftPadding: window.scaledSize(10)
+                rightPadding: window.scaledSize(10)
+                topPadding: 0
+                bottomPadding: 0
+                indicator: null
+                arrow: null
+                contentItem: Text {
+                    text: menuEntry.text
+                    color: menuEntry.highlighted ? backend.themeAccent : window.textColor
+                    font.family: backend.editorFont
+                    font.pixelSize: window.scaledSize(12)
+                    verticalAlignment: Text.AlignVCenter
+                    elide: Text.ElideRight
+                }
+                background: Rectangle {
+                    color: window.selectionFill
+                    opacity: menuEntry.down ? 0.35 : menuEntry.highlighted ? 0.18 : 0
+                }
+                onTriggered: {
+                    if (index < 2) {
+                        sidebar.beginCreate(index === 1);
+                    } else if (index === 2) {
+                        entryDialog.mode = "rename";
+                        entryDialog.target = sidebar.selectedUrl;
+                        entryName.text = explorer.nameForUrl(sidebar.selectedUrl);
+                        entryDialog.open();
+                    } else {
+                        deleteDialog.target = sidebar.selectedUrl;
+                        deleteDialog.folder = sidebar.selectedDirectory;
+                        deleteDialog.open();
+                    }
+                }
             }
         }
     }
